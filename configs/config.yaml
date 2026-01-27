@@ -1,0 +1,23 @@
+defaults:
+  - _self_
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+project_name: "ChessZero"
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  hydra_logging:
+    level: ERROR
+
+preprocessing:
+  states_per_file: 500
+  min_half_moves: 40
+  min_elo: 2400
+  game_count: 20
+
+model:
+  depth: 7
+  filter_count: 256

@@ -1,0 +1,12 @@
+jax
+pgx
+mctx
+optax
+flax
+hydra-core
+chex
+chess
+numpy
+omegaconf
+etils
+tqdm
