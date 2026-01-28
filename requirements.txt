@@ -10,3 +10,5 @@ numpy
 omegaconf
 etils
 tqdm
+grain
+tensorflow-datasets

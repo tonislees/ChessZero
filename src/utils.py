@@ -82,7 +82,7 @@ def get_action_index(board: chess.Board, uci: str):
     return pgx_from * 73 + plane
 
 
-def run_test_scenario(name: str, moves_san: str):
+def run_test_scenario(name: str, moves_san: list):
     """Run a single test chess game scenario"""
 
     print(f"--- Testing Scenario: {name} ---")
@@ -155,24 +155,15 @@ def test_scenarios():
         print("\nSome tests FAILED.")
 
 
-def reconstruct_observations(obs_bin: jnp.ndarray, obs_scalar: jnp.ndarray):
-    """Reconstruct the AlphaZero 8x8x119 tensor from compressed boolean and scalar arrays"""
-    batch_size = obs_bin.shape[0]
+def count_games(self, file_path):
+    """Quickly count games by looking for the start of PGN headers"""
 
-    move_count = obs_scalar[:, 0].reshape(batch_size, 1, 1, 1)
-    rep_count = obs_scalar[:, 1].reshape(batch_size, 1, 1, 1)
-
-    move_plane = jnp.tile(move_count, (1, 8, 8, 1))
-    prog_plane = jnp.tile(rep_count, (1, 8, 8, 1))
-
-    bin_part = obs_bin.astype(jnp.float32)
-
-    part_A = bin_part[..., :113]
-    part_B = bin_part[..., 113:]
-
-    full_obs = jnp.concatenate([part_A, move_plane, part_B, prog_plane], axis=-1)
-
-    return full_obs
+    count = 0
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            if line.startswith('[Event '):
+                count += 1
+    return count
 
 
 def save_compressed_batch(obs_batch: np.ndarray, action_batch: np.ndarray, filename: Path):
@@ -180,22 +171,42 @@ def save_compressed_batch(obs_batch: np.ndarray, action_batch: np.ndarray, filen
 
     moves_scalar = obs_batch[:, 0, 0, 113]
     no_prog_scalar = obs_batch[:, 0, 0, 118]
-    scalars = jnp.stack([moves_scalar, no_prog_scalar], axis=1).astype(jnp.float16)
+    scalars = np.stack([moves_scalar, no_prog_scalar], axis=1).astype(np.float16)
 
     # We keep 0-113, skip 113, keep 114-118, skip 118
-    binary_part = jnp.concatenate([
+    binary_part = np.concatenate([
         obs_batch[..., :113],
         obs_batch[..., 114:118]
     ], axis=-1)
 
-    binary_packed = binary_part.astype(jnp.bool_)
+    binary_packed = binary_part.astype(np.bool_)
 
     np.savez_compressed(
         filename,
         obs_bin=binary_packed,
         obs_scalar=scalars,
-        policy=action_batch.astype(jnp.int16),
+        policy=action_batch.astype(np.int16),
     )
+
+
+def reconstruct_observations(obs_bin: np.ndarray, obs_scalar: np.ndarray):
+    """Reconstruct the AlphaZero 8x8x119 tensor from compressed boolean and scalar arrays"""
+    batch_size = obs_bin.shape[0]
+
+    move_count = obs_scalar[:, 0].reshape(batch_size, 1, 1, 1)
+    rep_count = obs_scalar[:, 1].reshape(batch_size, 1, 1, 1)
+
+    move_plane = np.tile(move_count, (1, 8, 8, 1))
+    prog_plane = np.tile(rep_count, (1, 8, 8, 1))
+
+    bin_part = obs_bin.astype(np.float32)
+
+    part_A = bin_part[..., :113]
+    part_B = bin_part[..., 113:]
+
+    full_obs = np.concatenate([part_A, move_plane, part_B, prog_plane], axis=-1)
+
+    return full_obs
 
 
 if __name__ == "__main__":

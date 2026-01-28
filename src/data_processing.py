@@ -9,7 +9,7 @@ import pgx
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-from src.utils import get_action_index, save_compressed_batch
+from src.utils import get_action_index, save_compressed_batch, count_games
 
 
 class DataProcessor:
@@ -30,18 +30,7 @@ class DataProcessor:
         self.game_count = game_count
 
 
-    def count_games(self, file_path):
-        """Quickly count games by looking for the start of PGN headers"""
-
-        count = 0
-        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                if line.startswith('[Event '):
-                    count += 1
-        return count
-
-
-    def filter_game_quality(self, game):
+    def _filter_game_quality(self, game):
         """Filter out all games where both players' ratings are above min_elo
         and the game lasted for at least 20 full moves"""
 
@@ -62,7 +51,7 @@ class DataProcessor:
         return game.end().ply() > self.min_half_moves
 
 
-    def save_batch(self):
+    def _save_batch(self):
         np_obs = np.stack(self.obs_buffer)
         np_action = np.array(self.action_buffer, dtype=np.int32)
 
@@ -74,7 +63,7 @@ class DataProcessor:
         self.batch_counter += 1
 
 
-    def game_to_samples(self, game: chess.pgn.Game):
+    def _game_to_samples(self, game: chess.pgn.Game):
         """Process a single game to tensors"""
 
         board = game.board()
@@ -93,7 +82,7 @@ class DataProcessor:
             state = self.step_fn(state, action_tensor)
 
             if len(self.obs_buffer) >= self.states_per_file:
-                self.save_batch()
+                self._save_batch()
 
 
     def process_data(self):
@@ -106,7 +95,7 @@ class DataProcessor:
         game_counter = 0
 
         for file in files:
-            total_games = self.game_count if self.game_count >= 0 else self.count_games(file)
+            total_games = self.game_count if self.game_count >= 0 else count_games(file)
             with open(file, 'r', encoding='utf-8', errors='replace') as f:
                 with tqdm(total=total_games, desc=f"Processing {file.name}", unit='games') as pbar:
                     while True:
@@ -116,10 +105,10 @@ class DataProcessor:
                             continue
                         if game is None: break
     
-                        if not self.filter_game_quality(game):
+                        if not self._filter_game_quality(game):
                             continue
 
-                        self.game_to_samples(game)
+                        self._game_to_samples(game)
                         game_counter += 1
                         pbar.update(1)
                         if game_counter >= self.game_count:
@@ -127,7 +116,7 @@ class DataProcessor:
             if game_counter >= self.game_count:
                 break
         if (len(self.obs_buffer)) > 0:
-            self.save_batch()
+            self._save_batch()
 
 
 @hydra.main(version_base=None, config_path='../configs', config_name='config')
