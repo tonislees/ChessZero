@@ -10,6 +10,9 @@ from tensorflow_datasets.core import download, splits as splits_lib, split_build
 
 class Dataset(tfds.core.GeneratorBasedBuilder, ABC):
     VERSION = tfds.core.Version('1.0.0')
+    MANUAL_DOWNLOAD_INSTRUCTIONS = """
+        Download some PGN-files to data/raw directory and then run the data_processing.py file.
+    """
 
     def _info(self) -> tfds.core.dataset_info.DatasetInfo:
         return tfds.core.DatasetInfo(
@@ -25,10 +28,13 @@ class Dataset(tfds.core.GeneratorBasedBuilder, ABC):
     def _split_generators(
       self,
       dl_manager: download.DownloadManager,
-    ) -> dict[splits_lib.Split, split_builder_lib.SplitGenerator]:
-        return {
-            'train': self._generate_examples(dl_manager.manual_dir)
-        }
+    ):
+        return [
+            tfds.core.SplitGenerator(
+                name=tfds.Split.TRAIN,
+                gen_kwargs={'path': dl_manager.manual_dir}
+            )
+        ]
 
     def _generate_examples(
       self, path, **kwargs: Any

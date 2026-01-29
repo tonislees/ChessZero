@@ -1,80 +1,101 @@
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
+from flax import nnx
 
-class ConvBlock(nn.Module):
-    filter_count: int
+class ConvBlock(nnx.Module):
+    def __init__(self, filter_count: int, rngs: nnx.Rngs):
+        self.filter_count = filter_count
+        self.conv = nnx.Conv(in_features=119, out_features=filter_count, kernel_size=(3, 3), padding=1, rngs=rngs)
+        self.bn = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
 
-    @nn.compact
     def __call__(self, x: jnp.ndarray, train: bool):
         x = x.reshape((-1, 8, 8, 119))
-        x = nn.Conv(features=self.filter_count, kernel_size=(3, 3), padding=1)(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
+        x = self.conv(x)
+        x = self.bn(x, use_running_average=not train)
 
-        return nn.relu(x)
+        return nnx.relu(x)
 
 
-class ResBlock(nn.Module):
-    filter_count: int
+class ResBlock(nnx.Module):
+    def __init__(self, filter_count: int, rngs: nnx.Rngs):
+        self.conv1 = nnx.Conv(in_features=filter_count, out_features=filter_count,
+                              kernel_size=(3, 3), padding=1, rngs=rngs)
+        self.bn1 = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
 
-    @nn.compact
+        self.conv2 = nnx.Conv(in_features=filter_count, out_features=filter_count,
+                              kernel_size=(3, 3), padding=1, rngs=rngs)
+        self.bn2 = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
+
     def __call__(self, x: jnp.ndarray, train: bool):
         residual = x
 
-        x = nn.Conv(features=self.filter_count, kernel_size=(3, 3), padding=1)(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
-        x = nn.relu(x)
+        x = self.conv1(x)
+        x = self.bn1(x, use_running_average=not train)
+        x = nnx.relu(x)
 
-        x = nn.Conv(features=self.filter_count, kernel_size=(3, 3), padding=1)(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
+        x = self.conv2(x)
+        x = self.bn2(x, use_running_average=not train)
 
         x = x + residual
-        return nn.relu(x)
+        return nnx.relu(x)
 
 
-class PolicyOutBlock(nn.Module):
-    filter_count: int
+class PolicyOutBlock(nnx.Module):
+    def __init__(self, filter_count: int, rngs: nnx.Rngs):
+        self.conv = nnx.Conv(in_features=filter_count, out_features=73, kernel_size=(1, 1), rngs=rngs)
+        self.bn = nnx.BatchNorm(num_features=73, rngs=rngs)
 
-    @nn.compact
     def __call__(self, x: jnp.ndarray, train: bool):
-        x = nn.Conv(features=73, kernel_size=(1, 1))(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
+        x = self.conv(x)
+        x = self.bn(x, use_running_average=not train)
 
         x = x.reshape((x.shape[0], -1))
+        return x
+
+
+class ValueOutBlock(nnx.Module):
+    def __init__(self, filter_count: int, rngs: nnx.Rngs):
+        self.conv = nnx.Conv(in_features=filter_count, out_features=1, kernel_size=(1, 1), rngs=rngs)
+        self.bn = nnx.BatchNorm(num_features=1, rngs=rngs)
+
+        self.dense1 = nnx.Linear(in_features=64, out_features=256, rngs=rngs)
+        self.dense2 = nnx.Linear(in_features=256, out_features=3, rngs=rngs)
+
+    def __call__(self, x: jnp.ndarray, train: bool):
+        x = self.conv(x)
+        x = self.bn(x, use_running_average=not train)
+        x = nnx.relu(x)
+
+        x = x.reshape((x.shape[0], -1))
+
+        x = self.dense1(x)
+        x = nnx.relu(x)
+        x = self.dense2(x)
 
         return x
 
 
-class ValueOutBlock(nn.Module):
-    filter_count: int
+class ChessZeroNet(nnx.Module):
+    def __init__(self, depth: int, filter_count: int, rngs: nnx.Rngs):
+        self.depth = depth
+        self.filter_count = filter_count
 
-    @nn.compact
-    def __call__(self, x, train: bool):
-        x = nn.Conv(features=1, kernel_size=(1, 1))(x)
-        x = nn.BatchNorm(use_running_average=not train)(x)
-        x = nn.relu(x)
+        self.conv_block = ConvBlock(filter_count, rngs=rngs)
 
-        x = x.reshape((x.shape[0], -1))
+        self.res_blocks = nnx.List([
+            ResBlock(filter_count, rngs=rngs) for _ in range(depth)
+        ])
 
-        x = nn.Dense(features=256)(x)
-        x = nn.relu(x)
-        x = nn.Dense(features=3)(x)
+        self.policy_head = PolicyOutBlock(filter_count, rngs=rngs)
+        self.value_head = ValueOutBlock(filter_count, rngs=rngs)
 
-        return x
+    def __call__(self, x: jnp.ndarray, train: bool = True):
+        x = self.conv_block(x, train=train)
 
+        for block in self.res_blocks:
+            x = block(x, train=train)
 
-class DeepForkNet(nn.Module):
-    depth: int
-    filter_count: int
-
-    @nn.compact
-    def __call__(self, x, train: bool = True):
-        x = ConvBlock(filter_count=self.filter_count)(x, train=train)
-
-        for _ in range(self.depth):
-            x = ResBlock(filter_count=self.filter_count)(x, train=train)
-
-        policy = PolicyOutBlock(filter_count=self.filter_count)(x, train=train)
-        value = ValueOutBlock(filter_count=self.filter_count)(x, train=train)
+        policy = self.policy_head(x, train=train)
+        value = self.value_head(x, train=train)
 
         return policy, value

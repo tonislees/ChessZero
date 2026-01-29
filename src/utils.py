@@ -188,23 +188,23 @@ def save_compressed_batch(obs_batch: np.ndarray, action_batch: np.ndarray, filen
         policy=action_batch.astype(np.int16),
     )
 
-
-def reconstruct_observations(obs_bin: np.ndarray, obs_scalar: np.ndarray):
+@jax.jit
+def reconstruct_observations(obs_bin: jnp.ndarray, obs_scalar: jnp.ndarray):
     """Reconstruct the AlphaZero 8x8x119 tensor from compressed boolean and scalar arrays"""
     batch_size = obs_bin.shape[0]
 
     move_count = obs_scalar[:, 0].reshape(batch_size, 1, 1, 1)
     rep_count = obs_scalar[:, 1].reshape(batch_size, 1, 1, 1)
 
-    move_plane = np.tile(move_count, (1, 8, 8, 1))
-    prog_plane = np.tile(rep_count, (1, 8, 8, 1))
+    move_plane = jnp.tile(move_count, (1, 8, 8, 1))
+    prog_plane = jnp.tile(rep_count, (1, 8, 8, 1))
 
-    bin_part = obs_bin.astype(np.float32)
+    bin_part = obs_bin.astype(jnp.float32)
 
     part_A = bin_part[..., :113]
     part_B = bin_part[..., 113:]
 
-    full_obs = np.concatenate([part_A, move_plane, part_B, prog_plane], axis=-1)
+    full_obs = jnp.concatenate([part_A, move_plane, part_B, prog_plane], axis=-1)
 
     return full_obs
 

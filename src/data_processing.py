@@ -1,3 +1,5 @@
+import os
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 from pathlib import Path
 
 import chess.pgn
@@ -8,7 +10,9 @@ import numpy as np
 import pgx
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
+import tensorflow_datasets as tfds
 
+from src.dataset import Dataset
 from src.utils import get_action_index, save_compressed_batch, count_games
 
 
@@ -35,6 +39,10 @@ class DataProcessor:
         and the game lasted for at least 20 full moves"""
 
         headers = game.headers
+
+        if headers.get("FEN") is not None:
+            return False
+
         white_elo = headers.get('WhiteElo', '?')
         black_elo = headers.get("BlackElo", '?')
 
@@ -55,7 +63,7 @@ class DataProcessor:
         np_obs = np.stack(self.obs_buffer)
         np_action = np.array(self.action_buffer, dtype=np.int32)
 
-        file_name = Path(f'../data/processed/batch_{self.batch_counter:05d}')
+        file_name = self.processed_dir / f'batch_{self.batch_counter:05d}'
         save_compressed_batch(np_obs, np_action, file_name)
 
         self.obs_buffer = []
@@ -119,16 +127,30 @@ class DataProcessor:
             self._save_batch()
 
 
-@hydra.main(version_base=None, config_path='../configs', config_name='config')
+    def create_tfds_dataset(self):
+        builder = Dataset()
+        builder.download_and_prepare(
+            download_config=tfds.download.DownloadConfig(
+                manual_dir=self.processed_dir
+            ),
+            file_format='array_record'
+        )
+
+
+@hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
+
     print(f'Processing PGN-s with {cfg.preprocessing.states_per_file} states per file, '
           f'{cfg.preprocessing.min_elo} as min elo and {cfg.preprocessing.min_half_moves / 2} as min full moves')
+
     processor = DataProcessor(
         states_per_file=cfg.preprocessing.states_per_file,
         min_elo=cfg.preprocessing.min_elo,
         min_half_moves=cfg.preprocessing.min_half_moves,
         game_count=cfg.preprocessing.game_count)
+
     processor.process_data()
+    processor.create_tfds_dataset()
 
 
 if __name__ == "__main__":

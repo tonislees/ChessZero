@@ -1,5 +1,7 @@
 
-data/
+data/*
+models/checkpoints/*
+plots/*
 .idea/
 
 # Byte-compiled / optimized / DLL files
