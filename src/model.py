@@ -59,7 +59,7 @@ class ValueOutBlock(nnx.Module):
         self.bn = nnx.BatchNorm(num_features=1, rngs=rngs)
 
         self.dense1 = nnx.Linear(in_features=64, out_features=256, rngs=rngs)
-        self.dense2 = nnx.Linear(in_features=256, out_features=3, rngs=rngs)
+        self.dense2 = nnx.Linear(in_features=256, out_features=1, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = self.conv(x)
@@ -72,7 +72,7 @@ class ValueOutBlock(nnx.Module):
         x = nnx.relu(x)
         x = self.dense2(x)
 
-        return x
+        return x.squeeze(-1)
 
 
 class ChessZeroNet(nnx.Module):
@@ -89,7 +89,7 @@ class ChessZeroNet(nnx.Module):
         self.policy_head = PolicyOutBlock(filter_count, rngs=rngs)
         self.value_head = ValueOutBlock(filter_count, rngs=rngs)
 
-    def __call__(self, x: jnp.ndarray, train: bool = True):
+    def __call__(self, x: jnp.ndarray, train: bool = False):
         x = self.conv_block(x, train=train)
 
         for block in self.res_blocks:

@@ -37,8 +37,7 @@ def eval_step(model, metrics, batch):
 
 
 class Coach:
-    def __init__(self, num_epochs: int, batch_size: int, seed: int, drop_remainder: bool,
-                worker_count: int, num_records: int, learning_rate: float, depth: int, filter_count: int):
+    def __init__(self, cfg: DictConfig):
         root_dir = self.root = Path(__file__).resolve().parents[1]
         self.model_dir = root_dir / 'models'
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -46,13 +45,10 @@ class Coach:
         self.checkpointer = ocp.StandardCheckpointer()
         self.plot_dir = root_dir / 'plots'
         self.plot_dir.mkdir(parents=True, exist_ok=True)
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.seed = seed
-        self.rngs: nnx.Rngs = nnx.Rngs(seed)
-        self.worker_count = worker_count
-        self.num_records = num_records
-        self.model: nnx.Module = ChessZeroNet(depth=depth, filter_count=filter_count, rngs=self.rngs)
+        self.num_epochs = cfg.train.num_epochs
+        self.seed = cfg.train.seed
+        self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
+        self.model: nnx.Module = ChessZeroNet(depth=cfg.model.depth, filter_count=cfg.model.filter_count, rngs=self.rngs)
 
         if self.checkpoints_dir.exists() and any(self.checkpoints_dir.iterdir()):
             graphdef, abstract_state = nnx.split(self.model)
@@ -61,7 +57,7 @@ class Coach:
             print(f"Restored model from {self.checkpoints_dir}")
 
         self.optimizer: nnx.Optimizer = nnx.Optimizer(
-        self.model, optax.adamw(learning_rate=learning_rate), wrt=nnx.Param
+        self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
         )
         self.metrics: nnx.MultiMetric = nnx.MultiMetric(
             accuracy=nnx.metrics.Accuracy(),
@@ -73,12 +69,14 @@ class Coach:
           'test_loss': [],
           'test_accuracy': [],
         }
-        train_dl, test_dl = create_dataloaders(batch_size=batch_size, seed=seed, worker_count=worker_count,
-                                               num_epochs=num_epochs, num_records=num_records, drop_remainder=drop_remainder)
+        train_dl, test_dl = create_dataloaders(batch_size=cfg.train.batch_size, seed=self.seed,
+                                               worker_count=cfg.train.worker_count, num_epochs=self.num_epochs,
+                                               num_records=cfg.train.num_records,
+                                               drop_remainder=cfg.train.drop_remainder)
         self.train_iterator = train_dl
-        self.total_train_batches = len(self.train_iterator._sampler) // self.batch_size
+        self.total_train_batches = len(self.train_iterator._sampler) // cfg.train.batch_size
         self.test_iterator = test_dl
-        self.total_test_batches = len(self.test_iterator._sampler) // self.batch_size
+        self.total_test_batches = len(self.test_iterator._sampler) // cfg.train.batch_size
 
 
     def _train_epoch(self):
@@ -139,17 +137,7 @@ class Coach:
 
 @hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
-    coach = Coach(
-        num_epochs=cfg.train.num_epochs,
-        batch_size=cfg.train.batch_size,
-        seed=cfg.train.seed,
-        worker_count=cfg.train.worker_count,
-        num_records=cfg.train.num_records,
-        learning_rate=cfg.train.learning_rate,
-        depth=cfg.model.depth,
-        filter_count=cfg.model.filter_count,
-        drop_remainder=cfg.train.drop_remainder
-    )
+    coach = Coach(cfg)
     coach.train()
 
 
