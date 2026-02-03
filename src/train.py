@@ -1,5 +1,4 @@
 import datetime
-from pathlib import Path
 
 import hydra
 from omegaconf import DictConfig
@@ -7,11 +6,10 @@ from tqdm import tqdm
 
 from src.dataloader import create_dataloaders
 import optax
-import orbax.checkpoint as ocp
 from flax import nnx
 import matplotlib.pyplot as plt
 
-from src.model import ChessZeroNet
+from src.game import Game
 
 
 def loss_fn(model, batch, train=True):
@@ -36,26 +34,9 @@ def eval_step(model, metrics, batch):
     metrics.update(loss=loss, logits=logits, labels=batch['action'])
 
 
-class Coach:
+class Coach(Game):
     def __init__(self, cfg: DictConfig):
-        root_dir = self.root = Path(__file__).resolve().parents[1]
-        self.model_dir = root_dir / 'models'
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.checkpoints_dir = self.model_dir / 'checkpoints'
-        self.checkpointer = ocp.StandardCheckpointer()
-        self.plot_dir = root_dir / 'plots'
-        self.plot_dir.mkdir(parents=True, exist_ok=True)
-        self.num_epochs = cfg.train.num_epochs
-        self.seed = cfg.train.seed
-        self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
-        self.model: nnx.Module = ChessZeroNet(depth=cfg.model.depth, filter_count=cfg.model.filter_count, rngs=self.rngs)
-
-        if self.checkpoints_dir.exists() and any(self.checkpoints_dir.iterdir()):
-            graphdef, abstract_state = nnx.split(self.model)
-            restored_state = self.checkpointer.restore(self.checkpoints_dir, abstract_state)
-            self.model = nnx.merge(graphdef, restored_state)
-            print(f"Restored model from {self.checkpoints_dir}")
-
+        super().__init__(cfg)
         self.optimizer: nnx.Optimizer = nnx.Optimizer(
         self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
         )

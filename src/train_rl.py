@@ -6,7 +6,6 @@ import hydra
 import jax
 import jax.numpy as jnp
 import optax
-import pgx
 from flax import nnx
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
@@ -82,11 +81,7 @@ class CoachRL(Coach):
             "value_target": jnp.zeros((), dtype=jnp.float32)
         }
         self.buffer_state = self.buffer.init(example_transition)
-        self.env = pgx.make('chess')
-        key_env = jax.random.PRNGKey(self.seed + 1)
-        self.env_state = jax.jit(jax.vmap(self.env.init))(
-            jax.random.split(key_env, cfg.train.batch_size)
-        )
+
 
     def learn_rl(self):
         print("Starting RL Loop...")

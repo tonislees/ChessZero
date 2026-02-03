@@ -39,3 +39,6 @@ train:
   drop_remainder: False
   self_play_steps: 200
   iterations: 10
+
+interface:
+  start_player: white

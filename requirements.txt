@@ -16,3 +16,4 @@ matplotlib
 tensorflow
 orbax-checkpoint
 flashbax
+stockfish

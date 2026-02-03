@@ -8,29 +8,57 @@ import pgx
 import jax.numpy as jnp
 
 
-def create_deltas():
-    """Create move deltas for cleaner implementation"""
+def create_lookup_tables():
+    """
+    Create O(1) lookup tables for Pgx action mapping.
+    Pgx uses:
+    - File-Major Board (a1=0, a2=1, ..., b1=8)
+    - 73 Planes: [0-8]: Underpromotion, [9-72]: Queen/Knight
+    """
+    # Replicating pgx delta generation exactly
     zeros = [0] * 7
-    sequence = list(range(1, 8))
-    reverse_sequence = list(range(-7, 0))
+    seq = list(range(1, 8))
+    rseq = list(range(-7, 0))
 
-    # Concatenate vectors to match the loop order 9..72
-    # Order: down, up, left, right, down-left, down-right, up-right, up-left, knight, and knight
-    dr = reverse_sequence + sequence + zeros            + zeros    + reverse_sequence + sequence + sequence[::-1]   + reverse_sequence[::-1]
-    dc = zeros            + zeros    + reverse_sequence + sequence + reverse_sequence + sequence + reverse_sequence + sequence
-
-    # Add Knight moves (Planes 65-72)
+    # 0: Down, 1: Up, 2: Left, 3: Right
+    # 4: DL, 5: DR, 6: UR, 7: UL
+    # 8-15: Knight moves
+    dr = rseq + seq + zeros + zeros + rseq + seq + seq[::-1] + rseq[::-1]
+    dc = zeros + zeros + rseq + seq + rseq + seq + rseq + seq
     dr += [-1, +1, -2, +2, -1, +1, -2, +2]
     dc += [-2, -2, -1, -1, +2, +2, +1, +1]
-    return dr, dc
+
+    # Map (dy, dx) -> plane_index (relative to 9)
+    delta_to_plane = {}
+    plane_to_delta = {}
+    for i in range(len(dr)):
+        delta_to_plane[(dr[i], dc[i])] = 9 + i
+        plane_to_delta[9 + i] = (dr[i], dc[i])
+
+    return delta_to_plane, plane_to_delta
 
 
-DR, DC = create_deltas()
+DELTA_TO_PLANE, PLANE_TO_DELTA = create_lookup_tables()
+
+
+# --- 2. Helper: Coordinate Transforms ---
+def file_major_to_rank_major(pgx_idx):
+    """Convert Pgx (File-Major) index to python-chess (Rank-Major) index"""
+    file = pgx_idx // 8
+    rank = pgx_idx % 8
+    return chess.square(file, rank)
+
+
+def rank_major_to_file_major(sq):
+    """Convert python-chess index to Pgx index"""
+    file = chess.square_file(sq)
+    rank = chess.square_rank(sq)
+    return file * 8 + rank
 
 
 def get_action_index(board: chess.Board, uci: str):
     """Convert a move from uci to AlphaZero action index"""
-    move = board.parse_san(uci)
+    move = board.parse_uci(uci)
     from_sq = move.from_square
     to_sq = move.to_square
 
@@ -71,15 +99,51 @@ def get_action_index(board: chess.Board, uci: str):
             plane = (piece_offset * 3) + direction
 
     else:
-        for i in range(64):
-            if dy == DR[i] and dx == DC[i]:
-                plane = 9 + i
-                break
+        plane = DELTA_TO_PLANE.get((dy, dx), -1)
 
     if plane == -1:
         raise ValueError(f"Could not map move {uci} to a Pgx plane.")
 
     return pgx_from * 73 + plane
+
+
+def get_move_from_action(action_idx: int, board: chess.Board):
+    plane = action_idx % 73
+    pgx_from = action_idx // 73
+
+    promotion_piece = None
+    dy, dx = 0, 0
+
+    if plane < 9:
+        piece_type = plane // 3
+        piece_dir = plane % 3
+
+        promotion_piece = [chess.ROOK, chess.BISHOP, chess.KNIGHT][piece_type]
+        dx = [0, 1, -1][piece_dir]  # Up, Right, Left
+        dy = 1
+    else:
+        dy, dx = PLANE_TO_DELTA[plane]
+
+    from_file = pgx_from // 8
+    from_rank = pgx_from % 8
+
+    to_file = from_file + dx
+    to_rank = from_rank + dy
+
+    is_black = board.turn == chess.BLACK if board else False
+
+    actual_from_rank = (7 - from_rank) if is_black else from_rank
+    actual_to_rank = (7 - to_rank) if is_black else to_rank
+
+    from_sq = chess.square(from_file, actual_from_rank)
+    to_sq = chess.square(to_file, actual_to_rank)
+
+    if promotion_piece is None and ((is_black and actual_to_rank == 0) or (not is_black and actual_to_rank == 7)) \
+            and board and board.piece_type_at(from_sq) == chess.PAWN:
+                promotion_piece = chess.QUEEN
+
+    move = chess.Move(from_sq, to_sq, promotion_piece)
+    return move.uci()
 
 
 def run_test_scenario(name: str, moves_san: list):
@@ -93,7 +157,10 @@ def run_test_scenario(name: str, moves_san: list):
     py_board = chess.Board()
 
     for move_san in moves_san:
-        print(f"Playing: {move_san} ({'White' if py_board.turn else 'Black'})")
+        move_obj = py_board.parse_san(move_san)
+        expected_uci = move_obj.uci()
+
+        print(f"Playing: {move_san} -> {expected_uci} ({'White' if py_board.turn else 'Black'})")
 
         try:
             action_idx = get_action_index(py_board, move_san)
@@ -104,11 +171,20 @@ def run_test_scenario(name: str, moves_san: list):
         is_legal = state.legal_action_mask[action_idx]
         if not is_legal:
             print(f"FAIL: Pgx says move {move_san} (Index {action_idx}) is ILLEGAL.")
-            print(f"Legal indices: {jnp.flatnonzero(state.legal_action_mask)}")
+            return False
+
+        decoded_uci = get_move_from_action(action_idx, py_board)
+
+        if decoded_uci != expected_uci:
+            print(f"FAIL: Round trip mismatch!")
+            print(f"  Input SAN: {move_san}")
+            print(f"  Expected UCI: {expected_uci}")
+            print(f"  Decoded UCI:  {decoded_uci}")
+            print(f"  Action Index: {action_idx}")
             return False
 
         state = step_fn(state, action_idx)
-        py_board.push_san(move_san)
+        py_board.push(move_obj)
 
     print("SUCCESS: All moves applied correctly.\n")
     return True
@@ -116,22 +192,11 @@ def run_test_scenario(name: str, moves_san: list):
 
 def test_scenarios():
     """Run 6 different scenarios testing different edge cases"""
-    # Scenario 1: Basic Opening (White and Black)
     moves_1 = ["e4", "e5", "Nf3", "Nc6"]
-
-    # Scenario 2: Castling
     moves_2 = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "O-O"]
-
-    # Scenario 3: En Passant
     moves_3 = ["e4", "h6", "e5", "d5", "exd6"]
-
-    # Scenario 4: Knight Jumps
     moves_5 = ["Na3", "Nh6", "Nc4"]
-
-    # Scenario 5: Promotion
     moves_6 = ["a4", "b5", "axb5", "c5", "bxc6", "a5", "c7", "a4", "cxb8=Q"]
-
-    # Scenario 6: Underpromotion
     moves_7 = ["g4", "h5", "gxh5", "f5", "h6", "e5", "hxg7", "e4", "gxh8=N"]
 
     tests = [
