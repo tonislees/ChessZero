@@ -1,5 +1,6 @@
 import datetime
 from functools import partial
+from pathlib import Path
 
 import flashbax as fbx
 import hydra
@@ -9,10 +10,12 @@ import optax
 from flax import nnx
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
+import orbax.checkpoint as ocp
 from tqdm import tqdm
 
+from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
-from src.train import Coach
+from src.model import HnefataflZeroNet
 
 
 def rl_loss_fn(model, batch, train=True):
@@ -61,27 +64,66 @@ def self_play_step(model, env_state, buffer_state, rng_key, num_simulations, env
     return next_env_state, new_buffer_state
 
 
-class CoachRL(Coach):
+class Coach:
     def __init__(self, cfg: DictConfig):
-        super().__init__(cfg)
+        # Directories
+        root_dir = self.root = Path(__file__).resolve().parents[1]
+        self.model_dir = root_dir / 'models'
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoints_dir = self.model_dir / 'checkpoints'
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        self.plot_dir = root_dir / 'plots'
+        self.plot_dir.mkdir(parents=True, exist_ok=True)
+
+        # Setup
         self.cfg = cfg
+        self.seed = cfg.train.seed
+        self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
+        self.checkpointer = ocp.StandardCheckpointer()
+        self.num_epochs = cfg.train.num_epochs
+        self.num_simulations = cfg.mcts.simulations
+        self.metrics_history = {
+            'train_loss': [],
+            'train_policy_loss': [],
+            'train_value_loss': [],
+        }
+        self.metrics: nnx.MultiMetric = nnx.MultiMetric(
+            accuracy=nnx.metrics.Accuracy(),
+            loss=nnx.metrics.Average(argname='loss'),
+        )
+
+        # Buffer
         self.buffer = fbx.make_flat_buffer(
             max_length=cfg.buffer.size,
             min_length=cfg.buffer.min_size,
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
         )
-        self.metrics_history.update({
-            'train_policy_loss': [],
-            'train_value_loss': [],
-        })
         example_transition = {
-            "observation": jnp.zeros((8, 8, 119), dtype=jnp.float32),
-            "policy_target": jnp.zeros((4672,), dtype=jnp.float32),
+            "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
+            "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
             "value_target": jnp.zeros((), dtype=jnp.float32)
         }
         self.buffer_state = self.buffer.init(example_transition)
 
+        # Environment
+        self.train_env = Hnefatafl()
+        key_env = jax.random.PRNGKey(self.seed + 1)
+        self.env_state = jax.jit(jax.vmap(self.train_env.init))(
+            jax.random.split(key_env, cfg.train.batch_size)
+        )
+
+        # Model & optimizer
+        self.model: nnx.Module = HnefataflZeroNet(depth=cfg.model.depth, filter_count=cfg.model.filter_count,
+                                              rngs=self.rngs)
+        self.optimizer: nnx.Optimizer = nnx.Optimizer(
+            self.model, optax.adamw(learning_rate=cfg.train.learning_rate), wrt=nnx.Param
+        )
+        if self.checkpoints_dir.exists() and any(self.checkpoints_dir.iterdir()):
+            graphdef, abstract_state = nnx.split(self.model)
+            restored_state = self.checkpointer.restore(self.checkpoints_dir, abstract_state)
+            self.model = nnx.merge(graphdef, restored_state)
+            print(f"Restored model from {self.checkpoints_dir}")
 
     def learn_rl(self):
         print("Starting RL Loop...")
@@ -108,7 +150,7 @@ class CoachRL(Coach):
                 self.buffer_state,
                 rng_key,
                 self.cfg.mcts.simulations,
-                self.env,
+                self.train_env,
                 self.buffer
             )
 
@@ -182,9 +224,15 @@ class CoachRL(Coach):
         plt.close(fig)
         print(f"Saved training plot to {plot_path}")
 
+
+    def save_model(self):
+        _, state = nnx.split(self.model)
+        self.checkpointer.save(self.checkpoints_dir, state, force=True)
+        print(f"Checkpoint saved to {self.checkpoints_dir}")
+
 @hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
-    coach = CoachRL(cfg)
+    coach = Coach(cfg)
     coach.learn_rl()
 
 

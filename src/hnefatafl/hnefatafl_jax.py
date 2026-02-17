@@ -354,26 +354,25 @@ class Game:
         state = state._replace(step_count=state.step_count + 1)
         return state
 
-    def observe(self, state: GameState):
+    @staticmethod
+    def observe(state: GameState):
         ones = jnp.ones((1, BOARD_EDGE, BOARD_EDGE), dtype=jnp.float32)
         color = (state.color + 1) // 2
 
         def make(i):
             board = jnp.rot90(state.board_history[i].reshape((BOARD_EDGE, BOARD_EDGE)), k=1)
 
-            def piece_feat(piece):
-                return (board == piece).astype(jnp.float32)
-
-            friendly_pieces = jax.vmap(piece_feat)(jnp.arange(1, 3))
-            enemy_pieces = jax.vmap(piece_feat)(-jnp.arange(1, 3))
+            friendly_pieces = (board == (state.color * TAFLMAN)).astype(jnp.float32)
+            enemy_pieces = (board == (-state.color * TAFLMAN)).astype(jnp.float32)
+            king = (jnp.abs(board) == KING).astype(jnp.float32)
 
             hash_ = state.hash_history[i, :]
             rep = (state.hash_history == hash_).all(axis=1).sum() - 1
             rep = lax.select((hash_ == 0).all(), 0, rep)
-            rep0 = ones * (rep >= 1)
-            rep1 = ones * (rep >= 2)
+            rep0 = jnp.squeeze(ones * (rep >= 1), axis=0)
+            rep1 = jnp.squeeze(ones * (rep >= 2), axis=0)
 
-            return jnp.vstack([friendly_pieces, enemy_pieces, rep0, rep1])
+            return jnp.vstack([friendly_pieces, enemy_pieces, king, rep0, rep1])
 
         return jnp.vstack(
             [
@@ -491,7 +490,7 @@ def _shift_right(grid):
 def _flood_fill(start_mask: Array, valid_mask: Array, iterations: int) -> Array:
     """Expands a boolean mask into adjacent squares defined by valid_mask."""
 
-    def _expand_step(i, current_mask):
+    def _expand_step(_, current_mask):
         grid = current_mask.reshape(BOARD_EDGE, BOARD_EDGE)
         neighbors = _shift_up(grid) | _shift_down(grid) | _shift_left(grid) | _shift_right(grid)
         return current_mask | (neighbors.flatten() & valid_mask)

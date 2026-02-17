@@ -1,15 +1,19 @@
-import jax
 import jax.numpy as jnp
 from flax import nnx
+
+BOARD_EDGE = 11
+PLANES = 40
+OBS_PLANES = 43
+
 
 class ConvBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
         self.filter_count = filter_count
-        self.conv = nnx.Conv(in_features=119, out_features=filter_count, kernel_size=(3, 3), padding=1, rngs=rngs)
+        self.conv = nnx.Conv(in_features=OBS_PLANES, out_features=filter_count, kernel_size=(3, 3), padding=1, rngs=rngs)
         self.bn = nnx.BatchNorm(num_features=filter_count, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
-        x = x.reshape((-1, 8, 8, 119))
+        x = x.reshape((-1, BOARD_EDGE, BOARD_EDGE, OBS_PLANES))
         x = self.conv(x)
         x = self.bn(x, use_running_average=not train)
 
@@ -42,8 +46,8 @@ class ResBlock(nnx.Module):
 
 class PolicyOutBlock(nnx.Module):
     def __init__(self, filter_count: int, rngs: nnx.Rngs):
-        self.conv = nnx.Conv(in_features=filter_count, out_features=73, kernel_size=(1, 1), rngs=rngs)
-        self.bn = nnx.BatchNorm(num_features=73, rngs=rngs)
+        self.conv = nnx.Conv(in_features=filter_count, out_features=PLANES, kernel_size=(1, 1), rngs=rngs)
+        self.bn = nnx.BatchNorm(num_features=PLANES, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
         x = self.conv(x)
@@ -58,7 +62,7 @@ class ValueOutBlock(nnx.Module):
         self.conv = nnx.Conv(in_features=filter_count, out_features=1, kernel_size=(1, 1), rngs=rngs)
         self.bn = nnx.BatchNorm(num_features=1, rngs=rngs)
 
-        self.dense1 = nnx.Linear(in_features=64, out_features=256, rngs=rngs)
+        self.dense1 = nnx.Linear(in_features=BOARD_EDGE ** 2, out_features=256, rngs=rngs)
         self.dense2 = nnx.Linear(in_features=256, out_features=1, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool):
@@ -75,7 +79,7 @@ class ValueOutBlock(nnx.Module):
         return x.squeeze(-1)
 
 
-class ChessZeroNet(nnx.Module):
+class HnefataflZeroNet(nnx.Module):
     def __init__(self, depth: int, filter_count: int, rngs: nnx.Rngs):
         self.depth = depth
         self.filter_count = filter_count
