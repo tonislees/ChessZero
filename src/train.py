@@ -18,7 +18,7 @@ from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
 
 
-def rl_loss_fn(model, batch, train=True):
+def loss_fn(model, batch, train=True):
     logits, value = model(batch['observation'], train=train)
     policy_loss = optax.softmax_cross_entropy(
         logits=logits, labels=batch['policy_target']
@@ -31,8 +31,8 @@ def rl_loss_fn(model, batch, train=True):
 
 
 @nnx.jit
-def train_step_rl(model, optimizer, batch):
-    grad_fn = nnx.value_and_grad(rl_loss_fn, has_aux=True)
+def train_step(model, optimizer, batch):
+    grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
     (loss, (p_loss, v_loss)), grads = grad_fn(model, batch)
     optimizer.update(model, grads)
     return loss, p_loss, v_loss
@@ -40,7 +40,7 @@ def train_step_rl(model, optimizer, batch):
 
 @partial(nnx.jit, static_argnames=('num_simulations', 'env', 'buffer'))
 def self_play_step(model, env_state, buffer_state, rng_key, num_simulations, env, buffer):
-    key_search, key_act = jax.random.split(rng_key)
+    key_reset, key_search, key_act = jax.random.split(rng_key, 3)
 
     mcts_output = run_mcts(model, env_state, key_search, num_simulations, env)
     actions = mcts_output.action
@@ -60,6 +60,18 @@ def self_play_step(model, env_state, buffer_state, rng_key, num_simulations, env
         "value_target": final_value_target
     }
     new_buffer_state = buffer.add(buffer_state, transition)
+
+    batch_size = env_state.current_player.shape[0]
+
+    reset_keys = jax.random.split(key_reset, batch_size)
+    reset_states = jax.vmap(env.init)(reset_keys)
+
+    def select_if_terminated(reset_val, next_val):
+        shape = (batch_size,) + (1,) * (next_val.ndim - 1)
+        mask = next_env_state.terminated.reshape(shape)
+        return jnp.where(mask, reset_val, next_val)
+
+    next_env_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
 
     return next_env_state, new_buffer_state
 
@@ -115,9 +127,10 @@ class Coach:
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
 
         # Buffer
+        min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
-            max_length=cfg.buffer.size,
-            min_length=cfg.buffer.min_size,
+            max_length=min_buffer_size * 8,
+            min_length=min_buffer_size,
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
         )
@@ -197,7 +210,7 @@ class Coach:
             batch = self.buffer.sample(self.buffer_state, rng_key)
             training_data = batch.experience.first
 
-            loss, p_loss, v_loss = train_step_rl(
+            loss, p_loss, v_loss = train_step(
                 self.model,
                 self.optimizer,
                 training_data

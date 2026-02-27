@@ -76,6 +76,8 @@ class ValueOutBlock(nnx.Module):
         x = nnx.relu(x)
         x = self.dense2(x)
 
+        x = jnp.tanh(x)
+
         return x.squeeze(-1)
 
 

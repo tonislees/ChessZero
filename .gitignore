@@ -6,6 +6,7 @@ bayeselo
 game_results.pgn
 .idea/
 commands.txt
+config.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

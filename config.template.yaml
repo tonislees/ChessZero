@@ -17,21 +17,17 @@ model:
   filter_count: 256
 
 mcts:
-  simulations: 50
-
-buffer:
-  size: 10000
-  min_size: 2000
+  simulations: 2
 
 train:
+  iterations: 10
+  batch_size: 2
+  self_play_steps: 100
   num_epochs: 15
-  batch_size: 128
+  max_eval_pool: 10
   seed: 42
   worker_count: 10
   learning_rate: 0.001
-  self_play_steps: 512
-  iterations: 10
-  max_eval_pool: 20
   load_checkpoint: False
 
 interface:

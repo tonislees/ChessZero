@@ -4,7 +4,7 @@ import jax.numpy as jnp
 import pgx.core as core
 from src.hnefatafl.hnefatafl_jax import Game, GameState, INIT_LEGAL_ACTION_MASK, _flip
 from pgx._src.struct import dataclass
-from pgx._src.types import Array, PRNGKey
+from pgx._src.types import Array
 
 
 @dataclass

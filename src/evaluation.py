@@ -40,9 +40,11 @@ class Evaluator:
         self.checkpointer = checkpointer
         self.env = env
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
+        self.base_state = self._init_eval_state()
+
+    def _init_eval_state(self):
         batch_size = self.cfg.train.batch_size
         half = batch_size // 2
-
         key_env = jax.random.split(self.rngs.split(), batch_size)
         state = jax.jit(jax.vmap(self.env.init))(key_env)
 
@@ -51,13 +53,15 @@ class Evaluator:
             jnp.tile(jnp.array([1, 0]), (batch_size - half, 1))
         ], axis=0)
 
-        self.env_state = state.replace(
+        return state.replace(
             _player_order=player_order,
             current_player=player_order[:, 0]
         )
 
     def evaluate_model(self, iteration: int) -> int:
         """Evaluates the main model against a random past checkpoint model with BayesElo."""
+        env_state = self.base_state
+
         opponent = self._load_random_opponent()
         if not opponent:
             print("Skipping evaluation")
@@ -72,16 +76,16 @@ class Evaluator:
 
         pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}")
 
-        while not jnp.all(self.env_state.terminated):
+        while not jnp.all(env_state.terminated):
             rng_key = self.rngs.split()
-            self.env_state = _arena_step(self.model, self.eval_model, self.env_state, rng_key, num_simulations, self.env)
+            env_state = _arena_step(self.model, self.eval_model, env_state, rng_key, num_simulations, self.env)
             pbar.update(1)
-            if self.env_state.terminated.all():
+            if env_state.terminated.all():
                 break
         pbar.close()
 
         # Collect results
-        rewards = jax.device_get(self.env_state.rewards)
+        rewards = jax.device_get(env_state.rewards)
         match_data = []
         current_model = f"iter_{iteration}"
         batch_size = self.cfg.train.batch_size
