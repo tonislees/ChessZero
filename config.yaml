@@ -3,7 +3,7 @@ defaults:
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
 
-project_name: "ChessZero"
+project_name: "HnefataflZero"
 
 hydra:
   run:
@@ -14,10 +14,10 @@ hydra:
 
 model:
   depth: 7
-  filter_count: 128
+  filter_count: 256
 
 mcts:
-  simulations: 2
+  simulations: 50
 
 buffer:
   size: 10000
@@ -25,13 +25,13 @@ buffer:
 
 train:
   num_epochs: 15
-  batch_size: 2
+  batch_size: 128
   seed: 42
   worker_count: 10
   learning_rate: 0.001
-  self_play_steps: 200
-  iterations: 2
-  max_eval_pool: 10
+  self_play_steps: 512
+  iterations: 10
+  max_eval_pool: 20
   load_checkpoint: False
 
 interface:
