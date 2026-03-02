@@ -254,7 +254,8 @@ class Coach:
             batch_size=self.cfg.train.batch_size
         )
 
-        self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions, self.buffer)
+        final_transitions_cpu = jax.device_get(final_transitions)
+        self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
 
     def _run_training_loop(self):
         self.model.train()
