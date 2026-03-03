@@ -11,11 +11,14 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
                  embedding, env, graph_def):
     next_game_state = jax.vmap(env.game.mcts_step)(embedding._x, action)
 
+    batch_idx = jnp.arange(action.shape[0])[:, None]
+    color_idx = (next_game_state.color + 1) // 2
+
     next_state = embedding.replace(
         _x=next_game_state,
         terminated=jax.vmap(env.game.is_terminal)(next_game_state),
-        rewards=jax.vmap(env.game.rewards)(next_game_state)[jnp.arange(action.shape[0]), embedding._player_order],
-        current_player=embedding._player_order[jnp.arange(action.shape[0]), next_game_state.color]
+        rewards=jax.vmap(env.game.rewards)(next_game_state)[batch_idx, embedding._player_order],
+        current_player=embedding._player_order[jnp.arange(action.shape[0]), color_idx]
     )
 
     next_obs = jax.vmap(env.game.observe)(next_game_state)
