@@ -281,8 +281,8 @@ class Coach:
     def _run_training_loop(self):
         self.model.train()
 
-        steps = self.cfg.train.num_epochs
-        pbar = tqdm(range(steps), desc="Training", mininterval=self.cfg.train.tqdm_interval, ncols=100)
+        total_steps = self.cfg.train.self_play_steps * self.cfg.train.num_epochs
+        pbar = tqdm(range(total_steps), desc="Training", mininterval=self.cfg.train.tqdm_interval, ncols=100)
 
         for _ in pbar:
             rng_key = self.rngs.split()

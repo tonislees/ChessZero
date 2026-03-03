@@ -420,6 +420,25 @@ class Game:
         return terminated
 
     @staticmethod
+    def mcts_status(state: GameState):
+        king_captured = _check_king_captured(state)
+
+        king_pos_mask = jnp.abs(state.board) == 2
+        king_on_corner = (king_pos_mask & CORNERS_MASK).any()
+
+        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+
+        terminated = king_captured | king_on_corner | draw
+
+        attacker_won = king_captured
+        defender_won = king_on_corner
+
+        attacker_score = jnp.where(attacker_won, 1.0, jnp.where(defender_won, -1.0, 0.0))
+        defender_score = jnp.where(defender_won, 1.0, jnp.where(attacker_won, -1.0, 0.0))
+
+        return terminated, jnp.array([attacker_score, defender_score], dtype=jnp.float32)
+
+    @staticmethod
     def rewards(state: GameState):
         # Attackers win
         king_captured = _check_king_captured(state)
