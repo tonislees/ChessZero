@@ -75,11 +75,8 @@ class Evaluator:
             current_player=player_order[:, 0]
         )
 
-    def evaluate_model(self, iteration: int, model_state) -> int:
+    def evaluate_model(self, iteration: int) -> int:
         """Evaluates the main model against a random past checkpoint model with BayesElo."""
-        graph_def, _ = nnx.split(self.model)
-        self.model = nnx.merge(graph_def, jax.device_put(model_state))
-
         env_state = self.base_state
 
         opponent = self._load_random_opponent()
@@ -94,9 +91,14 @@ class Evaluator:
 
         num_simulations = self.cfg.mcts.simulations
 
+        pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}", mininterval=self.cfg.train.tqdm_interval,
+                    ncols=100, unit='steps')
+
         while not jnp.all(env_state.terminated):
             rng_key = self.rngs.split()
             env_state = _arena_step(self.model, self.eval_model, env_state, rng_key, num_simulations, self.env)
+            pbar.update(1)
+        pbar.close()
 
 
         # Collect results

@@ -1,4 +1,3 @@
-import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -83,6 +82,14 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
             "reward": current_player_rewards,
             "terminated": next_env_state.terminated,
         }
+
+        def update_pbar(_):
+            global _self_play_pbar
+            if '_self_play_pbar' in globals():
+                _self_play_pbar.update(1)
+
+        jax.debug.callback(update_pbar, key)
+
         return auto_reset_state, transition
 
     keys = jax.random.split(rng_key, num_steps)
@@ -96,13 +103,13 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
         out_transition = {
             'observation': transition['observation'],
             'policy_target': transition['policy_target'],
-            'value_target': return_
+            'value_target': return_,
         }
         return return_, out_transition
 
     _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
 
-    return final_env_state, final_transitions
+    return final_env_state, final_transitions, history['terminated'], history['reward']
 
 
 def dir_safe(dir_name: str, parent_dir: Path) -> Path:
@@ -166,7 +173,6 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.metrics_tracker = MetricsTracker(cfg, self.dirs)
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
-        self.eval_thread = None
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
@@ -225,18 +231,9 @@ class Coach:
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
 
             if iteration % eval_interval == 0:
-                if self.eval_thread and self.eval_thread.is_alive():
-                    print("Waiting for previous evaluation thread to finish...")
-                    self.eval_thread.join()
-
-                _, current_state = nnx.split(self.model)
-                eval_state_snapshot = jax.device_get(current_state)
-
-                self.eval_thread = threading.Thread(
-                    target=self._run_async_evaluation,
-                    args=(iteration, eval_state_snapshot)
-                )
-                self.eval_thread.start()
+                elo = self.evaluator.evaluate_model(iteration)
+                self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+                print(f">>> ELO | {elo}")
 
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
@@ -250,13 +247,6 @@ class Coach:
         self._save_progress()
         self.metrics_tracker.plot_metrics()
 
-    def _run_async_evaluation(self, iteration, model_state):
-        """Wrapper to run evaluation in a background thread and update metrics."""
-        elo = self.evaluator.evaluate_model(iteration, model_state)
-
-        self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
-        print(f"\n>>> ASYNC EVAL RESULT | Iteration {iteration} | Elo: {elo}\n")
-
     def _run_self_play_loop(self):
         self.model.eval()
 
@@ -265,7 +255,11 @@ class Coach:
 
         rng_key = self.rngs.split()
 
-        self.env_state, final_transitions = self_play(
+        global _self_play_pbar
+        _self_play_pbar = tqdm(total=steps, desc="Self-Play", mininterval=self.cfg.train.tqdm_interval,
+                               ncols=100, unit='steps')
+
+        self.env_state, final_transitions, terminals, rewards = self_play(
             model=self.model,
             env_state=self.env_state,
             rng_key=rng_key,
@@ -275,6 +269,20 @@ class Coach:
             batch_size=self.cfg.train.batch_size
         )
 
+        _self_play_pbar.close()
+        if '_self_play_pbar' in globals():
+            del globals()['_self_play_pbar']
+
+
+        terminals = jax.device_get(terminals)
+        rewards = jax.device_get(rewards)
+
+        total_terminated = int(terminals.sum())
+        total_draws = int((terminals & (rewards == 0)).sum())
+
+        draw_rate = total_draws / total_terminated if total_terminated > 0 else 0.0
+        print(f">>> Self-play games finished: {total_terminated} (Draws: {total_draws}, Draw Rate: {draw_rate:.1%})")
+
         final_transitions_cpu = jax.device_get(final_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
 
@@ -282,7 +290,8 @@ class Coach:
         self.model.train()
 
         total_steps = self.cfg.train.self_play_steps * self.cfg.train.num_epochs
-        pbar = tqdm(range(total_steps), desc="Training", mininterval=self.cfg.train.tqdm_interval, ncols=100)
+        pbar = tqdm(range(total_steps), desc="Training", mininterval=self.cfg.train.tqdm_interval,
+                    ncols=100, unit='steps')
 
         for _ in pbar:
             rng_key = self.rngs.split()
