@@ -221,6 +221,7 @@ class Coach:
 
     def train(self):
         eval_interval = self.cfg.train.eval_interval
+        eval_start = self.cfg.train.eval_start
         for i in range(self.cfg.train.iterations):
             start_time = time.time()
             iteration = i + self.last_iteration + 1
@@ -231,7 +232,7 @@ class Coach:
 
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
 
-            if iteration % eval_interval == 0:
+            if iteration % eval_interval == 0 and iteration >= eval_start:
                 elo = self.evaluator.evaluate_model(iteration)
                 self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
                 print(f">>> ELO | {elo}")

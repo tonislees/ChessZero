@@ -28,7 +28,7 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
         is_terminal = step_state.terminated
         should_update = is_terminal & ~t_mask
 
-        next_rewards = jnp.where(should_update, step_state.rewards, rewards)
+        next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
         next_mask = t_mask | is_terminal
 
         key_A, key_B, next_key = jax.random.split(key, 3)
@@ -75,6 +75,7 @@ class Evaluator:
         self.checkpointer = checkpointer
         self.env = env
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
+        self._add_to_eval_pool(iteration=0) # Add a baseline random model to the eval pool
         self.base_state = self._init_eval_state()
 
     def _init_eval_state(self):

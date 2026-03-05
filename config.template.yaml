@@ -26,11 +26,11 @@ train:
   num_epochs: 15
   max_eval_pool: 10
   seed: 42
-  worker_count: 10
   tqdm_interval: 5.0
   learning_rate: 0.001
   load_checkpoint: False
   eval_interval: 5
+  eval_start: 25
 
 interface:
   start_player: white
