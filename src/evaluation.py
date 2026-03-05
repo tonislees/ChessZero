@@ -6,6 +6,7 @@ from pathlib import Path
 
 import jax
 from flax import nnx
+from jax import lax
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 import jax.numpy as jnp
@@ -17,34 +18,51 @@ from src.model import HnefataflZeroNet
 
 
 @partial(nnx.jit, static_argnames=('num_simulations', 'env'))
-def _arena_step(model_A, model_B, state, key, num_simulations, env):
-    """Executes one batched turn in the arena where two distinct models play each other."""
-    key_A, key_B = jax.random.split(key)
+def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
+    graph_def_A, model_A_state = nnx.split(model_A)
+    graph_def_B, model_B_state = nnx.split(model_B)
 
-    is_p0 = (state.current_player == 0)
-    is_p1 = (state.current_player == 1)
+    def step_fn(loop_vars):
+        step_state, key, t_mask, rewards = loop_vars
 
-    any_p0 = jnp.any(is_p0 & ~state.terminated)
-    any_p1 = jnp.any(is_p1 & ~state.terminated)
+        is_terminal = step_state.terminated
+        should_update = is_terminal & ~t_mask
 
-    out_A_action = jax.lax.cond(
-        any_p0,
-        lambda _: run_mcts(model_A, state, key_A, num_simulations, env).action,
-        lambda _: jnp.zeros((state.current_player.shape[0],), dtype=jnp.int32),
-        operand=None
-    )
+        next_rewards = jnp.where(should_update, step_state.rewards, rewards)
+        next_mask = t_mask | is_terminal
 
-    out_B_action = jax.lax.cond(
-        any_p1,
-        lambda _: run_mcts(model_B, state, key_B, num_simulations, env).action,
-        lambda _: jnp.zeros((state.current_player.shape[0],), dtype=jnp.int32),
-        operand=None
-    )
+        key_A, key_B, next_key = jax.random.split(key, 3)
+        local_model_A = nnx.merge(graph_def_A, model_A_state)
+        local_model_B = nnx.merge(graph_def_B, model_B_state)
 
-    action = jnp.where(is_p0, out_A_action, out_B_action)
+        is_p0 = (step_state.current_player[0] == 0)
 
-    next_state = jax.vmap(env.step)(state, action)
-    return next_state
+        action = lax.cond(
+            is_p0,
+            lambda: run_mcts(local_model_A, step_state, key_A, num_simulations, env).action,
+            lambda: run_mcts(local_model_B, step_state, key_B, num_simulations, env).action
+        )
+
+        def update_pbar(_):
+            global _eval_pbar
+            if '_eval_pbar' in globals():
+                _eval_pbar.update(1)
+
+        jax.debug.callback(update_pbar, key)
+
+        return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
+
+    def cond_fn(loop_vars):
+        _, _, t_mask, _ = loop_vars
+        return ~jnp.all(t_mask)
+
+    termination_mask = jnp.zeros_like(state.terminated, dtype=jnp.bool_)
+    init_rewards = jnp.zeros_like(state.rewards)
+    init_loop_vars = (state, rng_key, termination_mask, init_rewards)
+    _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
+
+    return final_rewards
+
 
 
 class Evaluator:
@@ -79,42 +97,31 @@ class Evaluator:
         """Evaluates the main model against a random past checkpoint model with BayesElo."""
         env_state = self.base_state
 
+        current_model = f"iter_{iteration}"
         opponent = self._load_random_opponent()
         if not opponent:
             print("Skipping evaluation")
             self._add_to_eval_pool(iteration)
-            self.save_eval_pool()
-            return 0 # Baseline starting Elo
+            return 0  # Baseline starting Elo
 
         self.model.eval()
         self.eval_model.eval()
 
-        num_simulations = self.cfg.mcts.simulations
-
-        pbar = tqdm(total=512, desc=f"Arena: Iter_{iteration} vs {opponent}", mininterval=self.cfg.train.tqdm_interval,
-                    ncols=100, unit='steps')
-
-        while not jnp.all(env_state.terminated):
-            rng_key = self.rngs.split()
-            env_state = _arena_step(self.model, self.eval_model, env_state, rng_key, num_simulations, self.env)
-            pbar.update(1)
-        pbar.close()
-
+        global _eval_pbar
+        _eval_pbar = tqdm(total=512, desc='Evaluation', mininterval=self.cfg.train.tqdm_interval,
+                          ncols=100, unit='steps')
+        rewards = jax.device_get(evaluate(
+            model_A=self.model,
+            model_B=self.eval_model,
+            state=env_state,
+            rng_key=self.rngs.default(),
+            num_simulations=self.cfg.mcts.simulations,
+            env=self.env
+        ))
+        _eval_pbar.close()
 
         # Collect results
-        rewards = jax.device_get(env_state.rewards)
-        match_data = []
-        current_model = f"iter_{iteration}"
-        batch_size = self.cfg.train.batch_size
-        half = batch_size // 2
-
-        for i in range(half):
-            r = rewards[i, 0]
-            match_data.append((current_model, opponent, r))
-
-        for i in range(half, batch_size):
-            r = rewards[i, 1]
-            match_data.append((opponent, current_model, r))
+        match_data = self._get_eval_metrics(rewards, opponent, current_model)
 
         # Output PGN and run BayesElo
         self._generate_minimal_pgn(match_data)
@@ -124,9 +131,48 @@ class Evaluator:
 
         # Add the new iteration to the eval pool
         self._add_to_eval_pool(iteration)
-        self.save_eval_pool()
 
         return elo
+
+    def _get_eval_metrics(self, rewards: jax.Array, opponent: str, current_model: str):
+        """
+        Extracts games' metrics from rewards.
+        Returns metrics dict for BayesElo and logs evaluation results
+        """
+        match_data = []
+        batch_size = self.cfg.train.batch_size
+        half = batch_size // 2
+
+        p0_stats = {"wins": 0, "losses": 0, "draws": 0}
+        p1_stats = {"wins": 0, "losses": 0, "draws": 0}
+
+        for i in range(half):
+            # current_model is Attacker (P0)
+            rew = rewards[i, 0]
+            match_data.append((current_model, opponent, rew))
+            if rew == 1:
+                p0_stats["wins"] += 1
+            elif rew == -1:
+                p0_stats["losses"] += 1
+            else:
+                p0_stats["draws"] += 1
+
+        for i in range(half, batch_size):
+            # current_model is Defender (P1)
+            rew = rewards[i, 1]
+            match_data.append((opponent, current_model, rew))
+            if rew == -1:
+                p1_stats["wins"] += 1
+            elif rew == 1:
+                p1_stats["losses"] += 1
+            else:
+                p1_stats["draws"] += 1
+
+        print(f"\n{current_model} vs {opponent}:")
+        print(f"  As P0 (Attacker): {p0_stats['wins']}W/{p0_stats['losses']}L/{p0_stats['draws']}D")
+        print(f"  As P1 (Defender): {p1_stats['wins']}W/{p1_stats['losses']}L/{p1_stats['draws']}D")
+
+        return match_data
 
     def _generate_minimal_pgn(self, match_data):
         """
@@ -213,7 +259,7 @@ class Evaluator:
 
         for ckpt_dir in dirs[-self.cfg.train.max_eval_pool:]:
             restored_state = self.checkpointer.restore(ckpt_dir.resolve())
-            pool[ckpt_dir.name] = jax.device_get(restored_state) # Move to CPU
+            pool[ckpt_dir.name] = jax.device_get(restored_state)  # Move to CPU
 
         print(f"Loaded {len(pool)} models into the evaluation pool.")
         return pool

@@ -8,6 +8,7 @@ game_results.pgn
 commands.txt
 config.yaml
 train.sh
+GEMINI.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

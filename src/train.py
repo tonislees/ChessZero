@@ -80,6 +80,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
             "observation": state.observation,
             "policy_target": mcts_output.action_weights,
             "reward": current_player_rewards,
+            "attacker_reward": next_env_state.rewards[:, 0],
             "terminated": next_env_state.terminated,
         }
 
@@ -109,7 +110,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
 
     _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
 
-    return final_env_state, final_transitions, history['terminated'], history['reward']
+    return final_env_state, final_transitions, history['terminated'], history['attacker_reward']
 
 
 def dir_safe(dir_name: str, parent_dir: Path) -> Path:
@@ -273,18 +274,30 @@ class Coach:
         if '_self_play_pbar' in globals():
             del globals()['_self_play_pbar']
 
-
-        terminals = jax.device_get(terminals)
-        rewards = jax.device_get(rewards)
-
-        total_terminated = int(terminals.sum())
-        total_draws = int((terminals & (rewards == 0)).sum())
-
-        draw_rate = total_draws / total_terminated if total_terminated > 0 else 0.0
-        print(f">>> Self-play games finished: {total_terminated} (Draws: {total_draws}, Draw Rate: {draw_rate:.1%})")
-
+        self._log_results(terminals, rewards)
         final_transitions_cpu = jax.device_get(final_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
+
+    @staticmethod
+    def _log_results(terminals, rewards):
+        terminals = jax.device_get(terminals)
+        attacker_rewards = jax.device_get(rewards)
+
+        total_terminated = int(terminals.sum())
+        attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
+        defender_wins = int((terminals & (attacker_rewards == -1)).sum())
+        total_draws = int((terminals & (attacker_rewards == 0)).sum())
+
+        if total_terminated > 0:
+            a_win_rate = attacker_wins / total_terminated
+            d_win_rate = defender_wins / total_terminated
+            draw_rate = total_draws / total_terminated
+        else:
+            a_win_rate = d_win_rate = draw_rate = 0.0
+
+        print(f">>> Self-play games finished: {total_terminated}")
+        print(
+            f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
 
     def _run_training_loop(self):
         self.model.train()
@@ -321,7 +334,7 @@ class Coach:
         """Saves the model parameters, loss data, and evaluation data."""
         _, state = nnx.split(self.model)
         self.checkpointer.save(self.dirs['checkpoints'], state, force=True)
-
+        self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()
 
 
