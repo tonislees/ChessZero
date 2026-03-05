@@ -48,7 +48,7 @@ class Hnefatafl(core.Env):
             legal_action_mask=x.legal_action_mask,
             terminated=self.game.is_terminal(x),
             rewards=self.game.rewards(x)[state._player_order],
-            current_player=state._player_order[x.color],
+            current_player=state._player_order[(x.color + 1) // 2],
         )
         return state  # type: ignore
 

@@ -368,8 +368,8 @@ class Game:
         history_2d = state.board_history.reshape((8, BOARD_EDGE, BOARD_EDGE))
         board = jnp.rot90(history_2d, k=1, axes=(1, 2))
 
-        friendly_pieces = (board == (state.color * TAFLMAN)).astype(jnp.float32)
-        enemy_pieces = (board == (-state.color * TAFLMAN)).astype(jnp.float32)
+        friendly_pieces = (board == TAFLMAN).astype(jnp.float32)
+        enemy_pieces = (board == -TAFLMAN).astype(jnp.float32)
         king = (jnp.abs(board) == KING).astype(jnp.float32)
 
         hash_ = state.hash_history[:8, :]

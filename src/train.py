@@ -75,12 +75,14 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
         # Save temporary states to an array
         batch_indices = jnp.arange(batch_size)
         current_player_rewards = next_env_state.rewards[batch_indices, state.current_player]
+        internal_rewards = jax.vmap(env.game.rewards)(next_env_state._x)
+        attacker_rewards = internal_rewards[:, 0]
 
         transition = {
             "observation": state.observation,
             "policy_target": mcts_output.action_weights,
             "reward": current_player_rewards,
-            "attacker_reward": next_env_state.rewards[:, 0],
+            "attacker_reward": attacker_rewards,
             "terminated": next_env_state.terminated,
         }
 

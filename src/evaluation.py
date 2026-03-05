@@ -19,50 +19,56 @@ from src.model import HnefataflZeroNet
 
 @partial(nnx.jit, static_argnames=('num_simulations', 'env'))
 def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
+    """
+    Evaluates both roles in parallel using vmap.
+    state: Shape (2, Batch, ...) where state[0] is P0=Attacker, state[1] is P0=Defender
+    """
     graph_def_A, model_A_state = nnx.split(model_A)
     graph_def_B, model_B_state = nnx.split(model_B)
 
-    def step_fn(loop_vars):
-        step_state, key, t_mask, rewards = loop_vars
+    def run_one_role(single_role_state, role_key):
+        def step_fn(loop_vars):
+            step_state, key, t_mask, rewards = loop_vars
 
-        is_terminal = step_state.terminated
-        should_update = is_terminal & ~t_mask
+            is_terminal = step_state.terminated
+            should_update = is_terminal & ~t_mask
 
-        next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
-        next_mask = t_mask | is_terminal
+            next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
+            next_mask = t_mask | is_terminal
 
-        key_A, key_B, next_key = jax.random.split(key, 3)
-        local_model_A = nnx.merge(graph_def_A, model_A_state)
-        local_model_B = nnx.merge(graph_def_B, model_B_state)
+            key_A, key_B, next_key = jax.random.split(key, 3)
+            local_model_A = nnx.merge(graph_def_A, model_A_state)
+            local_model_B = nnx.merge(graph_def_B, model_B_state)
 
-        is_p0 = (step_state.current_player[0] == 0)
+            is_p0_turn = (step_state.current_player[0] == 0)
 
-        action = lax.cond(
-            is_p0,
-            lambda: run_mcts(local_model_A, step_state, key_A, num_simulations, env).action,
-            lambda: run_mcts(local_model_B, step_state, key_B, num_simulations, env).action
-        )
+            action = lax.cond(
+                is_p0_turn,
+                lambda: run_mcts(local_model_A, step_state, key_A, num_simulations, env).action,
+                lambda: run_mcts(local_model_B, step_state, key_B, num_simulations, env).action
+            )
 
-        def update_pbar(_):
-            global _eval_pbar
-            if '_eval_pbar' in globals():
-                _eval_pbar.update(1)
+            def update_pbar(_):
+                global _eval_pbar
+                if '_eval_pbar' in globals():
+                    _eval_pbar.update(1)
 
-        jax.debug.callback(update_pbar, key)
+            jax.debug.callback(update_pbar, key)
 
-        return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
+            return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
 
-    def cond_fn(loop_vars):
-        _, _, t_mask, _ = loop_vars
-        return ~jnp.all(t_mask)
+        def cond_fn(loop_vars):
+            _, _, t_mask, _ = loop_vars
+            return ~jnp.all(t_mask)
 
-    termination_mask = jnp.zeros_like(state.terminated, dtype=jnp.bool_)
-    init_rewards = jnp.zeros_like(state.rewards)
-    init_loop_vars = (state, rng_key, termination_mask, init_rewards)
-    _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
+        termination_mask = jnp.zeros_like(single_role_state.terminated, dtype=jnp.bool_)
+        init_rewards = jnp.zeros_like(single_role_state.rewards)
+        init_loop_vars = (single_role_state, role_key, termination_mask, init_rewards)
+        _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
+        return final_rewards
 
-    return final_rewards
-
+    keys = jax.random.split(rng_key, 2)
+    return jax.vmap(run_one_role)(state, keys)
 
 
 class Evaluator:
@@ -76,28 +82,28 @@ class Evaluator:
         self.env = env
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
         self._add_to_eval_pool(iteration=0) # Add a baseline random model to the eval pool
-        self.base_state = self._init_eval_state()
 
     def _init_eval_state(self):
+        """Initializes a 2D state [Role, Batch, ...] for parallel evaluation."""
         batch_size = self.cfg.train.batch_size
         half = batch_size // 2
-        key_env = jax.random.split(self.rngs.split(), batch_size)
-        state = jax.jit(jax.vmap(self.env.init))(key_env)
+        
+        def get_state(p0_is_attacker, num_games):
+            key_env = jax.random.split(self.rngs.split(), num_games)
+            state = jax.jit(jax.vmap(self.env.init))(key_env)
+            if p0_is_attacker:
+                player_order = jnp.tile(jnp.array([0, 1]), (num_games, 1))
+            else:
+                player_order = jnp.tile(jnp.array([1, 0]), (num_games, 1))
+            return state.replace(_player_order=player_order, current_player=player_order[:, 0])
 
-        player_order = jnp.concatenate([
-            jnp.tile(jnp.array([0, 1]), (half, 1)),
-            jnp.tile(jnp.array([1, 0]), (batch_size - half, 1))
-        ], axis=0)
+        state_p0_atk = get_state(True, half)
+        state_p0_def = get_state(False, batch_size - half)
 
-        return state.replace(
-            _player_order=player_order,
-            current_player=player_order[:, 0]
-        )
+        return jax.tree_util.tree_map(lambda x, y: jnp.stack([x, y]), state_p0_atk, state_p0_def)
 
     def evaluate_model(self, iteration: int) -> int:
         """Evaluates the main model against a random past checkpoint model with BayesElo."""
-        env_state = self.base_state
-
         current_model = f"iter_{iteration}"
         opponent = self._load_random_opponent()
         if not opponent:
@@ -108,9 +114,12 @@ class Evaluator:
         self.model.eval()
         self.eval_model.eval()
 
+        env_state = self._init_eval_state()
+
         global _eval_pbar
         _eval_pbar = tqdm(total=512, desc='Evaluation', mininterval=self.cfg.train.tqdm_interval,
                           ncols=100, unit='steps')
+
         rewards = jax.device_get(evaluate(
             model_A=self.model,
             model_B=self.eval_model,
@@ -137,7 +146,7 @@ class Evaluator:
 
     def _get_eval_metrics(self, rewards: jax.Array, opponent: str, current_model: str):
         """
-        Extracts games' metrics from rewards.
+        Extracts games' metrics from the rewards array of shape (2, Half, 2).
         Returns metrics dict for BayesElo and logs evaluation results
         """
         match_data = []
@@ -147,9 +156,9 @@ class Evaluator:
         p0_stats = {"wins": 0, "losses": 0, "draws": 0}
         p1_stats = {"wins": 0, "losses": 0, "draws": 0}
 
+        rewards_atk = rewards[0]
         for i in range(half):
-            # current_model is Attacker (P0)
-            rew = rewards[i, 0]
+            rew = rewards_atk[i, 0]
             match_data.append((current_model, opponent, rew))
             if rew == 1:
                 p0_stats["wins"] += 1
@@ -158,13 +167,13 @@ class Evaluator:
             else:
                 p0_stats["draws"] += 1
 
-        for i in range(half, batch_size):
-            # current_model is Defender (P1)
-            rew = rewards[i, 1]
+        rewards_def = rewards[1]
+        for i in range(batch_size - half):
+            rew = rewards_def[i, 0]
             match_data.append((opponent, current_model, rew))
-            if rew == -1:
+            if rew == 1:
                 p1_stats["wins"] += 1
-            elif rew == 1:
+            elif rew == -1:
                 p1_stats["losses"] += 1
             else:
                 p1_stats["draws"] += 1
