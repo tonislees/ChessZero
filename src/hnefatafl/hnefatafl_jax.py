@@ -187,21 +187,29 @@ def calc_capture_arrays():
     for to_sq in range(BOARD_SIZE):
         row, col = to_sq // BOARD_EDGE, to_sq % BOARD_EDGE
         #UP
+        if row - 1 >= 0:
+            neighbors[to_sq, 0] = (row - 1) * BOARD_EDGE + col
+
         if row - 2 >= 0:
             attack_pair[to_sq, 0] = (row - 2) * BOARD_EDGE + col
-            neighbors[to_sq, 0] = (row - 1) * BOARD_EDGE + col
         #RIGHT
+        if col + 1 < BOARD_EDGE:
+            neighbors[to_sq, 1] = row * BOARD_EDGE + (col + 1)
+
         if col + 2 < BOARD_EDGE:
             attack_pair[to_sq, 1] = row * BOARD_EDGE + (col + 2)
-            neighbors[to_sq, 1] = row * BOARD_EDGE + (col + 1)
         #DOWN
+        if row + 1 < BOARD_EDGE:
+            neighbors[to_sq, 2] = (row + 1) * BOARD_EDGE + col
+
         if row + 2 < BOARD_EDGE:
             attack_pair[to_sq, 2] = (row + 2) * BOARD_EDGE + col
-            neighbors[to_sq, 2] = (row + 1) * BOARD_EDGE + col
         #LEFT
+        if row - 1 >= 0:
+            neighbors[to_sq, 3] = row * BOARD_EDGE + (col - 1)
+
         if col - 2 >= 0:
             attack_pair[to_sq, 3] = row * BOARD_EDGE + (col - 2)
-            neighbors[to_sq, 3] = row * BOARD_EDGE + (col - 1)
 
     return attack_pair, neighbors
 
@@ -422,16 +430,17 @@ class Game:
     @staticmethod
     def mcts_status(state: GameState):
         king_captured = _check_king_captured(state)
+        encirclement = _check_encirclement(state)
+        attacker_won = king_captured | encirclement
 
         king_pos_mask = jnp.abs(state.board) == 2
         king_on_corner = (king_pos_mask & CORNERS_MASK).any()
+        edge_fort = _check_edge_fort(state)
+        defender_won = king_on_corner | edge_fort
 
         draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
 
-        terminated = king_captured | king_on_corner | draw
-
-        attacker_won = king_captured
-        defender_won = king_on_corner
+        terminated = attacker_won | defender_won | draw
 
         attacker_score = jnp.where(attacker_won, 1.0, jnp.where(defender_won, -1.0, 0.0))
         defender_score = jnp.where(defender_won, 1.0, jnp.where(attacker_won, -1.0, 0.0))

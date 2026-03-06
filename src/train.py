@@ -23,8 +23,9 @@ from src.model import HnefataflZeroNet
 
 def loss_fn(model, batch, train=True):
     logits, value = model(batch['observation'], train=train)
+    masked_logits = jnp.where(batch['legal_action_mask'], logits, -1e9)
     policy_loss = optax.softmax_cross_entropy(
-        logits=logits, labels=batch['policy_target']
+        logits=masked_logits, labels=batch['policy_target']
     ).mean()
     value_loss = optax.l2_loss(
         predictions=value.squeeze(), targets=batch['value_target']
@@ -84,6 +85,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
             "reward": current_player_rewards,
             "attacker_reward": attacker_rewards,
             "terminated": next_env_state.terminated,
+            "legal_action_mask": state.legal_action_mask
         }
 
         def update_pbar(_):
@@ -107,6 +109,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_
             'observation': transition['observation'],
             'policy_target': transition['policy_target'],
             'value_target': return_,
+            'legal_action_mask': transition['legal_action_mask']
         }
         return return_, out_transition
 
@@ -190,7 +193,8 @@ class Coach:
             example_transition = {
                 "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
                 "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
-                "value_target": jnp.zeros((), dtype=jnp.float32)
+                "value_target": jnp.zeros((), dtype=jnp.float32),
+                "legal_action_mask": jnp.zeros((121 * 40,), dtype=jnp.bool_)
             }
             self.buffer_state = self.buffer.init(example_transition)
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')

@@ -31,7 +31,7 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     logits, value = local_model(next_obs)
 
     rewards = next_state.rewards[jnp.arange(next_state.rewards.shape[0]), embedding.current_player]
-    discounts = jnp.where(next_state.terminated, 0.0, 1.0)
+    discounts = jnp.where(next_state.terminated, 0.0, -1.0)
 
     output = mctx.RecurrentFnOutput(
         reward=rewards,
