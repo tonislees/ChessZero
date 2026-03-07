@@ -27,8 +27,8 @@ def loss_fn(model: nnx.Module, batch: dict, train=True):
     is_attacker = (batch['player'] == 0)
     weights = jnp.where(is_attacker, 3.0, 1.0)
 
-    policy_loss = (policy_loss_raw * weights).mean()
-    value_loss = (value_loss_raw * weights).mean()
+    policy_loss = (policy_loss * weights).mean()
+    value_loss = (value_loss * weights).mean()
 
     total_loss = policy_loss + value_loss
     return total_loss, (policy_loss, value_loss)
