@@ -6,60 +6,14 @@ from pathlib import Path
 
 import jax
 from flax import nnx
-from jax import lax
+from jax import numpy as jnp, lax
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
-import jax.numpy as jnp
 from tqdm import tqdm
 
 from src.hnefatafl.hnefatafl import Hnefatafl
-from src.mcts import run_mcts_functional
+from src.mcts import run_mcts
 from src.model import HnefataflZeroNet
-
-
-@partial(nnx.jit, static_argnames=('num_simulations', 'env'))
-def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
-    graph_def_A, model_A_state = nnx.split(model_A)
-    graph_def_B, model_B_state = nnx.split(model_B)
-
-    def step_fn(loop_vars):
-        step_state, key, t_mask, rewards = loop_vars
-
-        is_terminal = step_state.terminated
-        should_update = is_terminal & ~t_mask
-
-        next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
-        next_mask = t_mask | is_terminal
-
-        key_A, key_B, next_key = jax.random.split(key, 3)
-
-        is_p0 = (step_state.current_player[0] == 0)
-
-        action = lax.cond(
-            is_p0,
-            lambda: run_mcts_functional(graph_def_A, model_A_state, step_state, key_A, num_simulations, env).action,
-            lambda: run_mcts_functional(graph_def_B, model_B_state, step_state, key_B, num_simulations, env).action
-        )
-
-        def update_pbar(_):
-            global _eval_pbar
-            if '_eval_pbar' in globals():
-                _eval_pbar.update(1)
-
-        jax.debug.callback(update_pbar, key)
-
-        return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
-
-    def cond_fn(loop_vars):
-        _, _, t_mask, _ = loop_vars
-        return ~jnp.all(t_mask)
-
-    termination_mask = jnp.zeros_like(state.terminated, dtype=jnp.bool_)
-    init_rewards = jnp.zeros_like(state.rewards)
-    init_loop_vars = (state, rng_key, termination_mask, init_rewards)
-    _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
-
-    return final_rewards
 
 
 class Evaluator:
@@ -119,7 +73,8 @@ class Evaluator:
             state=p0_state,
             rng_key=self.rngs.default(),
             num_simulations=self.cfg.mcts.simulations,
-            env=self.env
+            env=self.env,
+            batch_size=self.cfg.train.batch_size // 4
         ))
         rewards_p1 = jax.device_get(evaluate(
             model_A=self.model,
@@ -127,7 +82,8 @@ class Evaluator:
             state=p1_state,
             rng_key=self.rngs.default(),
             num_simulations=self.cfg.mcts.simulations,
-            env=self.env
+            env=self.env,
+            batch_size=self.cfg.train.batch_size // 4
         ))
         _eval_pbar.close()
 
@@ -145,7 +101,8 @@ class Evaluator:
 
         return elo
 
-    def _get_eval_metrics(self, rewards_p0: jax.Array, rewards_p1: jax.Array, opponent: str, current_model: str):
+    @staticmethod
+    def _get_eval_metrics(rewards_p0: jax.Array, rewards_p1: jax.Array, opponent: str, current_model: str):
         """
         Extracts games' metrics from the rewards array of shape (2, Half, 2).
         Returns metrics dict for BayesElo and logs evaluation results
@@ -308,3 +265,50 @@ class Evaluator:
         self.eval_model.eval()
 
         return opponent_name
+
+
+@partial(nnx.jit, static_argnames=('num_simulations', 'env', 'batch_size'))
+def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size):
+    graph_def_A, model_A_state = nnx.split(model_A)
+    graph_def_B, model_B_state = nnx.split(model_B)
+
+    def step_fn(loop_vars):
+        step_state, key, t_mask, rewards = loop_vars
+
+        is_terminal = step_state.terminated
+        should_update = is_terminal & ~t_mask
+
+        next_rewards = jnp.where(should_update[:, None], step_state.rewards, rewards)
+        next_mask = t_mask | is_terminal
+
+        key_A, key_B, next_key = jax.random.split(key, 3)
+
+        is_p0 = (step_state.current_player[0] == 0)
+
+        action = lax.cond(
+            is_p0,
+            lambda: run_mcts(graph_def_A, model_A_state, step_state, key_A, num_simulations, env,
+                             step_state.current_player, batch_size, attacker_explore=False).action,
+            lambda: run_mcts(graph_def_B, model_B_state, step_state, key_B, num_simulations, env,
+                             step_state.current_player, batch_size, attacker_explore=False).action
+        )
+
+        def update_pbar(_):
+            global _eval_pbar
+            if '_eval_pbar' in globals():
+                _eval_pbar.update(1)
+
+        jax.debug.callback(update_pbar, key)
+
+        return jax.vmap(env.step)(step_state, action), next_key, next_mask, next_rewards
+
+    def cond_fn(loop_vars):
+        _, _, t_mask, _ = loop_vars
+        return ~jnp.all(t_mask)
+
+    termination_mask = jnp.zeros_like(state.terminated, dtype=jnp.bool_)
+    init_rewards = jnp.zeros_like(state.rewards)
+    init_loop_vars = (state, rng_key, termination_mask, init_rewards)
+    _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
+
+    return final_rewards

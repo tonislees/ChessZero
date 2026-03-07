@@ -6,9 +6,11 @@ import pgx
 from flax import nnx
 import jax.numpy as jnp
 
+from src.utils import policy_value_by_player
+
 
 def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
-                 embedding, env, graph_def):
+                 embedding, env, graph_def, player: jax.Array):
     next_game_state = jax.vmap(env.game.mcts_step)(embedding._x, action)
 
     batch_idx = jnp.arange(action.shape[0])[:, None]
@@ -24,11 +26,9 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     )
 
     next_obs = jax.vmap(env.game.observe)(next_game_state)
-    
-    # Use functional call to avoid full merge overhead if possible, 
-    # but NNX merge is required to recover the module's __call__
+
     local_model = nnx.merge(graph_def, model_state)
-    logits, value = local_model(next_obs)
+    logits, value = policy_value_by_player(local_model(next_obs), player)
 
     rewards = next_state.rewards[jnp.arange(next_state.rewards.shape[0]), embedding.current_player]
     discounts = jnp.where(next_state.terminated, 0.0, -1.0)
@@ -43,21 +43,46 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     return output, next_state
 
 
-def run_mcts_functional(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env):
+def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
+             player: jax.Array, batch_size: int, attacker_explore: bool = True):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
     # Root inference
     local_model = nnx.merge(graph_def, model_state)
-    root_logits, root_value = local_model(env_state.observation, train=False)
+    root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), player)
+
+    is_attacker = (env_state._x.color == -1)
+
+    legal_mask = env_state.legal_action_mask
+    apply_dirichlet = is_attacker & attacker_explore
+    num_actions = root_logits.shape[-1]
+
+    noise_key, rng_key = jax.random.split(rng_key)
+    dirichlet_noise = jax.random.dirichlet(
+        noise_key,
+        alpha=jnp.full((num_actions,), 0.3),
+        shape=(batch_size,)
+    )
+    fraction = 0.25
+
+    probs = jax.nn.softmax(root_logits)
+    mixed_probs = (1 - fraction) * probs + fraction * dirichlet_noise
+
+    mixed_probs = jnp.where(legal_mask, mixed_probs, 1e-8)
+    mixed_probs = mixed_probs / jnp.sum(mixed_probs, axis=-1, keepdims=True)
+
+    noisy_logits = jnp.log(mixed_probs)
+
+    final_root_logits = jnp.where(apply_dirichlet[:, None], noisy_logits, root_logits)
 
     root = mctx.RootFnOutput(
-        prior_logits=root_logits,
+        prior_logits=final_root_logits,
         value=root_value,
         embedding=env_state
     )
 
-    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def)
+    rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, player=player)
 
     policy_output = mctx.gumbel_muzero_policy(
         params=model_state,
@@ -70,7 +95,3 @@ def run_mcts_functional(graph_def, model_state, env_state, rng_key: jax.Array, n
     )
 
     return policy_output
-
-def run_mcts(model: nnx.Module, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env):
-    graph_def, state = nnx.split(model)
-    return run_mcts_functional(graph_def, state, env_state, rng_key, num_simulations, env)

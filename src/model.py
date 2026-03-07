@@ -99,8 +99,10 @@ class HnefataflZeroNet(nnx.Module):
             ResBlock(filter_count, rngs=rngs) for _ in range(depth)
         ])
 
-        self.policy_head = PolicyOutBlock(filter_count, rngs=rngs)
-        self.value_head = ValueOutBlock(filter_count, rngs=rngs)
+        self.p0_policy_head = PolicyOutBlock(filter_count, rngs=rngs)
+        self.p0_value_head = ValueOutBlock(filter_count, rngs=rngs)
+        self.p1_policy_head = PolicyOutBlock(filter_count, rngs=rngs)
+        self.p1_value_head = ValueOutBlock(filter_count, rngs=rngs)
 
     def __call__(self, x: jnp.ndarray, train: bool = False):
         x = x.astype(jnp.bfloat16)
@@ -109,7 +111,9 @@ class HnefataflZeroNet(nnx.Module):
         for block in self.res_blocks:
             x = block(x, train=train)
 
-        policy = self.policy_head(x, train=train)
-        value = self.value_head(x, train=train)
+        p0_policy = self.p0_policy_head(x, train=train).astype(jnp.float32)
+        p0_value = self.p0_value_head(x, train=train).astype(jnp.float32)
+        p1_policy = self.p1_policy_head(x, train=train).astype(jnp.float32)
+        p1_value = self.p1_value_head(x, train=train).astype(jnp.float32)
 
-        return policy.astype(jnp.float32), value.astype(jnp.float32)
+        return p0_policy, p0_value, p1_policy, p1_value

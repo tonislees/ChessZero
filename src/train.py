@@ -19,113 +19,8 @@ from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
+from src.utils import dir_safe, add_to_buffer_cpu, train_step
 
-
-def loss_fn(model, batch, train=True):
-    logits, value = model(batch['observation'], train=train)
-    masked_logits = jnp.where(batch['legal_action_mask'], logits, -1e9)
-    policy_loss = optax.softmax_cross_entropy(
-        logits=masked_logits, labels=batch['policy_target']
-    ).mean()
-    value_loss = optax.l2_loss(
-        predictions=value.squeeze(), targets=batch['value_target']
-    ).mean()
-    total_loss = policy_loss + value_loss
-    return total_loss, (policy_loss, value_loss)
-
-
-@partial(jax.jit, backend='cpu', static_argnames=('buffer',))
-def add_to_buffer_cpu(buffer_state, transitions, buffer):
-    def add_step(buf_state, transition_batch):
-        return buffer.add(buf_state, transition_batch), None
-    new_buffer_state, _ = jax.lax.scan(add_step, buffer_state, transitions)
-    return new_buffer_state
-
-
-@nnx.jit
-def train_step(model, optimizer, batch):
-    grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, (p_loss, v_loss)), grads = grad_fn(model, batch)
-    optimizer.update(model, grads)
-    return loss, p_loss, v_loss
-
-
-@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
-def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size):
-    graph_def, model_state = nnx.split(model)
-
-    def step_fn(state, key):
-        key_reset, key_search = jax.random.split(key)
-        
-        from src.mcts import run_mcts_functional
-        mcts_output = run_mcts_functional(graph_def, model_state, state, key_search, num_simulations, env)
-        actions = mcts_output.action
-        next_env_state = jax.vmap(env.step)(state, actions)
-
-        # Auto reset if some game is terminal
-        reset_keys = jax.random.split(key_reset, batch_size)
-        reset_states = jax.vmap(env.init)(reset_keys)
-
-        def select_if_terminated(reset_val, next_val):
-            shape = (batch_size,) + (1,) * (next_val.ndim - 1)
-            mask = next_env_state.terminated.reshape(shape)
-            return jnp.where(mask, reset_val, next_val)
-
-        auto_reset_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
-
-        # Save temporary states to an array
-        batch_indices = jnp.arange(batch_size)
-        current_player_rewards = next_env_state.rewards[batch_indices, state.current_player]
-        internal_rewards = jax.vmap(env.game.rewards)(next_env_state._x)
-        attacker_rewards = internal_rewards[:, 0]
-
-        transition = {
-            "observation": state.observation,
-            "policy_target": mcts_output.action_weights,
-            "reward": current_player_rewards,
-            "attacker_reward": attacker_rewards,
-            "terminated": next_env_state.terminated,
-            "legal_action_mask": state.legal_action_mask
-        }
-
-        def update_pbar(_):
-            global _self_play_pbar
-            if '_self_play_pbar' in globals():
-                _self_play_pbar.update(1)
-
-        jax.debug.callback(update_pbar, key)
-
-        return auto_reset_state, transition
-
-    keys = jax.random.split(rng_key, num_steps)
-    final_env_state, history = jax.lax.scan(step_fn, env_state, keys)
-
-    # If the game doesn't end in a terminal state, bootstrap using the network's prediction
-    _, next_value = model(final_env_state.observation)
-
-    def step_back(next_return, transition):
-        return_ = jnp.where(transition['terminated'], transition['reward'], -next_return)
-        out_transition = {
-            'observation': transition['observation'],
-            'policy_target': transition['policy_target'],
-            'value_target': return_,
-            'legal_action_mask': transition['legal_action_mask']
-        }
-        return return_, out_transition
-
-    _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
-
-    return final_env_state, final_transitions, history['terminated'], history['attacker_reward']
-
-
-def dir_safe(dir_name: str, parent_dir: Path) -> Path:
-    """
-    Creates the specified directory if it doesn't already exist.
-    Returns the directory path.
-    """
-    dir_ = parent_dir / dir_name
-    dir_.mkdir(parents=True, exist_ok=True)
-    return dir_
 
 class Coach:
     def __init__(self, cfg: DictConfig):
@@ -194,7 +89,8 @@ class Coach:
                 "observation": jnp.zeros((11, 11, 43), dtype=jnp.float32),
                 "policy_target": jnp.zeros((121 * 40,), dtype=jnp.float32),
                 "value_target": jnp.zeros((), dtype=jnp.float32),
-                "legal_action_mask": jnp.zeros((121 * 40,), dtype=jnp.bool_)
+                "legal_action_mask": jnp.zeros((121 * 40,), dtype=jnp.bool_),
+                "player": jnp.zeros((), dtype=jnp.int32)
             }
             self.buffer_state = self.buffer.init(example_transition)
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
@@ -343,6 +239,76 @@ class Coach:
         self.checkpointer.save(self.dirs['checkpoints'], state, force=True)
         self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()
+
+
+@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
+def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size):
+    graph_def, model_state = nnx.split(model)
+
+    def step_fn(state, key):
+        key_reset, key_search = jax.random.split(key)
+
+        mcts_output = run_mcts(graph_def, model_state, state, key_search, num_simulations,
+                               env, state.current_player, batch_size=batch_size)
+        actions = mcts_output.action
+        next_env_state = jax.vmap(env.step)(state, actions)
+
+        # Auto reset if some game is terminal
+        reset_keys = jax.random.split(key_reset, batch_size)
+        reset_states = jax.vmap(env.init)(reset_keys)
+
+        def select_if_terminated(reset_val, next_val):
+            shape = (batch_size,) + (1,) * (next_val.ndim - 1)
+            mask = next_env_state.terminated.reshape(shape)
+            return jnp.where(mask, reset_val, next_val)
+
+        auto_reset_state = jax.tree_util.tree_map(select_if_terminated, reset_states, next_env_state)
+
+        # Save temporary states to an array
+        batch_indices = jnp.arange(batch_size)
+        current_player_rewards = next_env_state.rewards[batch_indices, state.current_player]
+        internal_rewards = jax.vmap(env.game.rewards)(next_env_state._x)
+        attacker_rewards = internal_rewards[:, 0]
+
+        transition = {
+            "observation": state.observation,
+            "policy_target": mcts_output.action_weights,
+            "reward": current_player_rewards,
+            "attacker_reward": attacker_rewards,
+            "terminated": next_env_state.terminated,
+            "legal_action_mask": state.legal_action_mask,
+            "player": state.current_player
+        }
+
+        def update_pbar(_):
+            global _self_play_pbar
+            if '_self_play_pbar' in globals():
+                _self_play_pbar.update(1)
+
+        jax.debug.callback(update_pbar, key)
+
+        return auto_reset_state, transition
+
+    keys = jax.random.split(rng_key, num_steps)
+    final_env_state, history = jax.lax.scan(step_fn, env_state, keys)
+
+    # If the game doesn't end in a terminal state, bootstrap using the network's prediction
+    _, _, _, next_value = model(final_env_state.observation)
+
+    def step_back(next_return, transition):
+        return_ = jnp.where(transition['terminated'], transition['reward'], -next_return)
+        out_transition = {
+            'observation': transition['observation'],
+            'policy_target': transition['policy_target'],
+            'value_target': return_,
+            'legal_action_mask': transition['legal_action_mask'],
+            'player': transition['player']
+        }
+        return return_, out_transition
+
+    _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
+
+    return final_env_state, final_transitions, history['terminated'], history['attacker_reward']
 
 
 @hydra.main(version_base=None, config_path='..', config_name='config')
