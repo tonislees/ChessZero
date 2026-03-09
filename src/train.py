@@ -204,12 +204,12 @@ class Coach:
         rates = (a_win_rate, d_win_rate, draw_rate)
         names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
         past_5_avg = [] # [Attacker avg, defender avg, draw avg]
-        history_len = max(1, len(self.metrics_tracker.metrics_history['attacker_win_rate']))
 
         for rate, name in zip(rates, names):
             history = self.metrics_tracker.metrics_history[name]
             history.append(rate)
-            past_5_avg.append(history[-min(history_len, 5)] / min(history_len, 5))
+            last_5 = history[-5:]
+            past_5_avg.append(sum(last_5) / len(last_5))
 
         self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
 
