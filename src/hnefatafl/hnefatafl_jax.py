@@ -483,20 +483,7 @@ class Game:
 
 
 def _check_king_captured(state: GameState):
-    king_val = KING * state.color
-    king_pos_arr = jnp.where(state.board == king_val, size=1)[0]
-    king_pos = king_pos_arr[0]
-
-    neighbor_indices = NEIGHBORS[king_pos]
-    neighbor_vals = jnp.take(state.board, neighbor_indices, mode='fill', fill_value=0)
-    is_attacker = (neighbor_vals == -state.color * TAFLMAN)
-    safe_neighbor_indices = jnp.maximum(neighbor_indices, 0)
-    is_hostile_sq = jnp.take(HOSTILE_SQUARES_MASK, safe_neighbor_indices, mode='fill', fill_value=False)
-    is_valid_attacker = is_hostile_sq & (neighbor_indices != -1) & (neighbor_vals == EMPTY)
-
-    captured = (is_attacker | is_valid_attacker).all()
-
-    return captured
+    return ~jnp.any(jnp.abs(state.board) == KING)
 
 
 def _shift_up(grid):
@@ -679,7 +666,7 @@ def _check_captures(state: GameState, to_sq):
     attack_pieces = jnp.take(state.board, attack_indices, mode='fill', fill_value=0)
     victim_pieces = jnp.take(state.board, victim_indices, mode='fill', fill_value=0)
 
-    is_victim_enemy = (victim_pieces == -1)  # Check if victims are enemies
+    is_victim_enemy = (victim_pieces < 0)  # Check if victims are enemies
     is_attacker_friendly = (attack_pieces > 0)  # Check if attackers are friendly
 
     is_attacker_square_hostile = jnp.take(HOSTILE_SQUARES_MASK, jnp.maximum(attack_indices, 0), mode='fill',
