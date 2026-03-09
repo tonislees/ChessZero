@@ -173,7 +173,8 @@ class Coach:
             env=self.env,
             batch_size=self.cfg.train.batch_size,
             reward_consts=jnp.array(self.reward_consts, dtype=jnp.float32),
-            dirichlet_fraction=self.cfg.train.dirichlet_fraction
+            dirichlet_fraction=self.cfg.train.dirichlet_fraction,
+            attacker_explore=self.cfg.train.attacker_explore
         )
 
         _self_play_pbar.close()
@@ -255,15 +256,16 @@ class Coach:
         self.metrics_tracker.save_metrics()
 
 
-@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
-def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size, reward_consts, dirichlet_fraction):
+@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env', 'attacker_explore'))
+def self_play(model, env_state, rng_key, num_steps, num_simulations,
+              env, batch_size, reward_consts, dirichlet_fraction, attacker_explore):
     graph_def, model_state = nnx.split(model)
 
     def step_fn(state, key):
         key_reset, key_search = jax.random.split(key)
 
         mcts_output = run_mcts(graph_def, model_state, state, key_search, num_simulations,
-                               env, state.current_player, batch_size, dirichlet_fraction, reward_consts=reward_consts)
+                               env, state.current_player, batch_size, dirichlet_fraction, attacker_explore, reward_consts=reward_consts)
         actions = mcts_output.action
         next_env_state = jax.vmap(env.step)(state, actions)
 
