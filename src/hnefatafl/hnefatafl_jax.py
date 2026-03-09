@@ -205,7 +205,7 @@ def calc_capture_arrays():
         if row + 2 < BOARD_EDGE:
             attack_pair[to_sq, 2] = (row + 2) * BOARD_EDGE + col
         #LEFT
-        if row - 1 >= 0:
+        if col - 1 >= 0:
             neighbors[to_sq, 3] = row * BOARD_EDGE + (col - 1)
 
         if col - 2 >= 0:
@@ -357,14 +357,6 @@ class Game:
         state = _flip(state)
         state = _update_history(state)
         state = state._replace(legal_action_mask=_legal_action_mask(state))
-        state = state._replace(step_count=state.step_count + 1)
-        return state
-
-    @staticmethod
-    def mcts_step(state: GameState, action: Array):
-        state = _apply_move(state, Action.from_label(action))
-        state = _flip(state)
-        state = _update_history(state)
         state = state._replace(step_count=state.step_count + 1)
         return state
 

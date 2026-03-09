@@ -11,7 +11,7 @@ from src.utils import policy_value_by_player
 
 def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
                  embedding, env, graph_def, player: jax.Array, reward_consts: jax.Array):
-    next_game_state = jax.vmap(env.game.mcts_step)(embedding._x, action)
+    next_game_state = jax.vmap(env.game.step)(embedding._x, action)
 
     batch_idx = jnp.arange(action.shape[0])[:, None]
     color_idx = (next_game_state.color + 1) // 2

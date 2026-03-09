@@ -19,7 +19,7 @@ from src.hnefatafl.hnefatafl import Hnefatafl
 from src.mcts import run_mcts
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
-from src.utils import dir_safe, add_to_buffer_cpu, train_step, calculate_dynamic_rewards
+from src.utils import dir_safe, add_to_buffer_cpu, train_step, calculate_dynamic_rewards, policy_value_by_player
 
 
 class Coach:
@@ -322,7 +322,7 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
     final_env_state, history = jax.lax.scan(step_fn, env_state, keys)
 
     # If the game doesn't end in a terminal state, bootstrap using the network's prediction
-    _, _, _, next_value = model(final_env_state.observation)
+    _, next_value = policy_value_by_player(model(final_env_state.observation), final_env_state.current_player)
 
     def step_back(next_return, transition):
         return_ = jnp.where(transition['terminated'], transition['reward'], -next_return)
