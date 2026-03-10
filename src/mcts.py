@@ -60,7 +60,7 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
 
     # Root inference
     local_model = nnx.merge(graph_def, model_state)
-    role = (env_state.color + 1) // 2
+    role = (env_state._x.color + 1) // 2
     root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), role)
 
     is_attacker = (env_state._x.color == -1)
