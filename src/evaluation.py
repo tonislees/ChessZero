@@ -47,6 +47,7 @@ class Evaluator:
         current_model = f"iter_{iteration}"
         num_opponents = min(4, len(self.eval_pool))
         opponents = self._load_random_opponents(num_opponents)
+        eval_sims = self.cfg.mcts.simulations // 2
 
         if not opponents or num_opponents < 4:
             print("    Skipping evaluation — not enough opponents.")
@@ -78,7 +79,7 @@ class Evaluator:
                 model_B=opponent_model,
                 state=p0_state,
                 rng_key=self.rngs.default(),
-                num_simulations=self.cfg.mcts.simulations,
+                num_simulations=eval_sims,
                 env=self.env,
                 batch_size=games_per_opponent,
                 dirichlet_fraction=0.0
@@ -88,7 +89,7 @@ class Evaluator:
                 model_B=opponent_model,
                 state=p1_state,
                 rng_key=self.rngs.default(),
-                num_simulations=self.cfg.mcts.simulations,
+                num_simulations=eval_sims,
                 env=self.env,
                 batch_size=games_per_opponent,
                 dirichlet_fraction=0.0
