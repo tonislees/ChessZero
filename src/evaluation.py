@@ -25,16 +25,11 @@ class Evaluator:
         self.model = model
         self.checkpointer = checkpointer
         self.env = env
+        self.last_elo = 0
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
-        self._add_to_eval_pool(iteration=0) # Add a baseline random model to the eval pool
+        self._add_to_eval_pool(iteration=0)
 
-    def _init_eval_state(self, is_starter: bool):
-        """
-        Initializes a state where the current model is starter is is_starter is true.
-        Returns the state.
-        """
-        batch_size = self.cfg.train.batch_size // 4
-
+    def _init_eval_state(self, is_starter: bool, batch_size: int):
         key_env = jax.random.split(self.rngs.split(), batch_size)
         state = jax.jit(jax.vmap(self.env.init))(key_env)
 
@@ -49,66 +44,83 @@ class Evaluator:
         )
 
     def evaluate_model(self, iteration: int) -> int:
-        """Evaluates the main model against a random past checkpoint model with BayesElo."""
         current_model = f"iter_{iteration}"
-        opponent = self._load_random_opponent()
-        if not opponent:
-            print("Skipping evaluation")
+        num_opponents = min(4, len(self.eval_pool))
+        opponents = self._load_random_opponents(num_opponents)
+
+        if not opponents:
+            print("  Skipping evaluation — eval pool empty.")
             self._add_to_eval_pool(iteration)
-            return 0  # Baseline starting Elo
+            return self.last_elo
+
+        games_per_opponent = (self.cfg.train.batch_size // 4) // num_opponents
 
         self.model.eval()
-        self.eval_model.eval()
-
-        p0_state = self._init_eval_state(is_starter=True)
-        p1_state = self._init_eval_state(is_starter=False)
 
         global _eval_pbar
-        _eval_pbar = tqdm(total=1024, desc='Evaluation', mininterval=self.cfg.train.tqdm_interval,
-                          ncols=100, unit='steps')
+        _eval_pbar = tqdm(
+            total=None,
+            desc='Evaluation',
+            mininterval=self.cfg.train.tqdm_interval,
+            ncols=100,
+            unit='steps'
+        )
 
-        rewards_p0 = jax.device_get(evaluate(
-            model_A=self.model,
-            model_B=self.eval_model,
-            state=p0_state,
-            rng_key=self.rngs.default(),
-            num_simulations=self.cfg.mcts.simulations,
-            env=self.env,
-            batch_size=self.cfg.train.batch_size // 4,
-            dirichlet_fraction=self.cfg.train.dirichlet_fraction
-        ))
-        rewards_p1 = jax.device_get(evaluate(
-            model_A=self.model,
-            model_B=self.eval_model,
-            state=p1_state,
-            rng_key=self.rngs.default(),
-            num_simulations=self.cfg.mcts.simulations,
-            env=self.env,
-            batch_size=self.cfg.train.batch_size // 4,
-            dirichlet_fraction=self.cfg.train.dirichlet_fraction
-        ))
+        all_match_data = []
+        opponent_summaries = []
+
+        for opponent_name, opponent_model in opponents.items():
+            p0_state = self._init_eval_state(is_starter=True, batch_size=games_per_opponent)
+            p1_state = self._init_eval_state(is_starter=False, batch_size=games_per_opponent)
+
+            rewards_p0 = jax.device_get(evaluate(
+                model_A=self.model,
+                model_B=opponent_model,
+                state=p0_state,
+                rng_key=self.rngs.default(),
+                num_simulations=self.cfg.mcts.simulations,
+                env=self.env,
+                batch_size=games_per_opponent,
+                dirichlet_fraction=0.0
+            ))
+            rewards_p1 = jax.device_get(evaluate(
+                model_A=self.model,
+                model_B=opponent_model,
+                state=p1_state,
+                rng_key=self.rngs.default(),
+                num_simulations=self.cfg.mcts.simulations,
+                env=self.env,
+                batch_size=games_per_opponent,
+                dirichlet_fraction=0.0
+            ))
+
+            match_data, summary = self._get_eval_metrics(
+                rewards_p0, rewards_p1, opponent_name, current_model
+            )
+            all_match_data.extend(match_data)
+            opponent_summaries.append(summary)
+
         _eval_pbar.close()
 
-        # Collect results
-        match_data = self._get_eval_metrics(rewards_p0, rewards_p1, opponent, current_model)
+        self._log_eval_results(current_model, opponent_summaries)
 
-        # Output PGN and run BayesElo
-        self._generate_minimal_pgn(match_data)
+        self._generate_minimal_pgn(all_match_data)
         ratings = self._run_bayeselo()
 
-        elo = ratings.get(current_model, 0)
+        elo = ratings.get(current_model, self.last_elo)
+        elo_delta = elo - self.last_elo
+        self.last_elo = elo
 
-        # Add the new iteration to the eval pool
+        print(f"  {'─' * 48}")
+        print(f"  Elo: {elo:+d}  (Δ {elo_delta:+d})")
+        print(f"  {'─' * 48}")
+
         self._add_to_eval_pool(iteration)
-
         return elo
 
     @staticmethod
-    def _get_eval_metrics(rewards_p0: jax.Array, rewards_p1: jax.Array, opponent: str, current_model: str):
-        """
-        Extracts games' metrics from the rewards array of shape (2, Half, 2).
-        Returns metrics dict for BayesElo and logs evaluation results
-        """
+    def _get_eval_metrics(rewards_p0: jax.Array, rewards_p1: jax.Array,
+                          opponent: str, current_model: str):
         match_data = []
 
         p0_stats = {"wins": 0, "losses": 0, "draws": 0}
@@ -117,58 +129,108 @@ class Evaluator:
         for i in range(len(rewards_p0)):
             rew = rewards_p0[i, 0]
             match_data.append((current_model, opponent, rew))
-            if rew == 1: p0_stats["wins"] += 1
+            if rew == 1:    p0_stats["wins"] += 1
             elif rew == -1: p0_stats["losses"] += 1
-            else: p0_stats["draws"] += 1
+            else:           p0_stats["draws"] += 1
 
         for i in range(len(rewards_p1)):
             rew = rewards_p1[i, 0]
             match_data.append((opponent, current_model, -rew))
-            if rew == 1: p1_stats["wins"] += 1
+            if rew == 1:    p1_stats["wins"] += 1
             elif rew == -1: p1_stats["losses"] += 1
-            else: p1_stats["draws"] += 1
+            else:           p1_stats["draws"] += 1
 
-        print(f"\n{current_model} vs {opponent}:")
-        print(f"  As P0 (Attacker): {p0_stats['wins']}W/{p0_stats['losses']}L/{p0_stats['draws']}D")
-        print(f"  As P1 (Defender): {p1_stats['wins']}W/{p1_stats['losses']}L/{p1_stats['draws']}D")
+        total_games = len(rewards_p0) + len(rewards_p1)
+        total_wins = p0_stats["wins"] + p1_stats["wins"]
+        total_losses = p0_stats["losses"] + p1_stats["losses"]
+        total_draws = p0_stats["draws"] + p1_stats["draws"]
+        score = (total_wins + 0.5 * total_draws) / total_games if total_games > 0 else 0.0
 
-        return match_data
+        summary = {
+            "opponent": opponent,
+            "p0": p0_stats,   # current model as attacker
+            "p1": p1_stats,   # current model as defender
+            "total": {"wins": total_wins, "losses": total_losses,
+                      "draws": total_draws, "games": total_games},
+            "score": score,
+        }
+
+        return match_data, summary
+
+    @staticmethod
+    def _log_eval_results(current_model: str, summaries: list[dict]):
+        total_wins = total_losses = total_draws = total_games = 0
+        att_wins = att_losses = att_draws = 0
+        def_wins = def_losses = def_draws = 0
+
+        print(f"\n{'  ═' * 17}")
+        print(f"  Evaluation: {current_model}")
+        print(f"{'  ═' * 17}")
+        print(f"  {'Opponent':<18} {'As Attacker':^22} {'As Defender':^22} {'Score':>6}")
+        print(f"  {'─' * 72}")
+
+        for s in summaries:
+            p0, p1 = s['p0'], s['p1']
+            opp_short = s['opponent'][-14:] if len(s['opponent']) > 14 else s['opponent']
+
+            att_str = f"{p0['wins']}W {p0['losses']}L {p0['draws']}D"
+            def_str = f"{p1['wins']}W {p1['losses']}L {p1['draws']}D"
+            score_str = f"{s['score']:.1%}"
+
+            print(f"  {opp_short:<18} {att_str:^22} {def_str:^22} {score_str:>6}")
+
+            total_wins   += s['total']['wins']
+            total_losses += s['total']['losses']
+            total_draws  += s['total']['draws']
+            total_games  += s['total']['games']
+
+            att_wins   += p0['wins'];   att_losses += p0['losses'];   att_draws += p0['draws']
+            def_wins   += p1['wins'];   def_losses += p1['losses'];   def_draws += p1['draws']
+
+        overall_score = (total_wins + 0.5 * total_draws) / total_games if total_games > 0 else 0.0
+
+        print(f"  {'─' * 72}")
+        print(f"  {'TOTAL':<18} "
+              f"{f'{att_wins}W {att_losses}L {att_draws}D':^22} "
+              f"{f'{def_wins}W {def_losses}L {def_draws}D':^22} "
+              f"{overall_score:>6.1%}")
+
+        # Attacker/Defender balance insight
+        att_total = att_wins + att_losses + att_draws
+        def_total = def_wins + def_losses + def_draws
+        att_winrate = att_wins / att_total if att_total > 0 else 0.0
+        def_winrate = def_wins / def_total if def_total > 0 else 0.0
+
+        weaker_side = "Attacker" if att_winrate < def_winrate else "Defender"
+        gap = abs(att_winrate - def_winrate)
+
+        print(f"\n  Attacker win rate: {att_winrate:.1%}   Defender win rate: {def_winrate:.1%}", end="")
+        if gap > 0.15:
+            print(f"   ⚠ {weaker_side} head lagging ({gap:.1%} gap)")
+        else:
+            print()
 
     def _generate_minimal_pgn(self, match_data):
-        """
-        match_data: A list of tuples containing (Attacker_Name, Defender_Name, Result)
-                    Result must be: 1 (Attacker wins), -1 (Defender wins), or 0 (Draw)
-        """
         with open(self.dirs['pgn'], "a") as f:
             for attacker, defender, reward in match_data:
-                if reward == 1:
-                    result_str = "1-0"
-                elif reward == -1:
-                    result_str = "0-1"
-                else:
-                    result_str = "1/2-1/2"
+                if reward == 1:     result_str = "1-0"
+                elif reward == -1:  result_str = "0-1"
+                else:               result_str = "1/2-1/2"
 
                 f.write(f'[White "{attacker}"]\n')
                 f.write(f'[Black "{defender}"]\n')
                 f.write(f'[Result "{result_str}"]\n')
-
-                # BayesElo requires at least one valid chess move to parse the block
                 f.write("1. d4 d5\n\n")
 
     def _run_bayeselo(self):
-        """
-        Runs BayesElo on the PGN file, computes maximum-likelihood ratings.
-        Returns a dictionary of Model -> Elo Rating.
-        """
         commands = f"""readpgn {self.dirs['pgn']}
-        elo
-        mm
-        exactdist
-        ratings
-        x
-        x
-        """
-
+elo
+mm
+exactdist
+ratings
+x
+x
+"""
         process = subprocess.Popen(
             [self.dirs['bayeselo']],
             stdin=subprocess.PIPE,
@@ -176,10 +238,8 @@ class Evaluator:
             stderr=subprocess.PIPE,
             text=True
         )
-
         stdout, stderr = process.communicate(commands)
 
-        # Parse the ASCII table output
         ratings = {}
         parsing_table = False
 
@@ -187,27 +247,21 @@ class Evaluator:
             if "Rank Name" in line:
                 parsing_table = True
                 continue
-
             if parsing_table:
                 parts = line.split()
                 if not parts or not parts[0].isdigit():
                     if "ResultSet" in line:
                         break
                     continue
-
-                # Extract name and Elo
-                name = parts[1]
-                elo = int(parts[2])
-                ratings[name] = elo
+                ratings[parts[1]] = int(parts[2])
 
         return ratings
 
     def _load_eval_pool(self, load_checkpoint: bool) -> dict[str, HnefataflZeroNet]:
-        """Load up to `max_pool_size` models from disk into a CPU dictionary."""
         pool = {}
         dir_path = self.dirs['eval_pool']
         if not load_checkpoint:
-            shutil.rmtree(dir_path)
+            shutil.rmtree(dir_path, ignore_errors=True)
             dir_path.mkdir(parents=True, exist_ok=True)
             return pool
 
@@ -219,54 +273,71 @@ class Evaluator:
 
         for ckpt_dir in dirs[-self.cfg.train.max_eval_pool:]:
             restored_state = self.checkpointer.restore(ckpt_dir.resolve())
-            pool[ckpt_dir.name] = jax.device_get(restored_state)  # Move to CPU
+            pool[ckpt_dir.name] = jax.device_get(restored_state)
 
-        print(f"Loaded {len(pool)} models into the evaluation pool.")
+        print(f"  Loaded {len(pool)} models into the evaluation pool.")
         return pool
 
     def _add_to_eval_pool(self, iteration: int) -> None:
-        """Snapshot the main model and randomly replace an old one if full."""
         _, current_state = nnx.split(self.model)
         model_name = f"iter_{iteration}"
 
         if len(self.eval_pool) >= self.cfg.train.max_eval_pool:
-            candidates = [name for name in self.eval_pool.keys()]
-            victim_name = random.choice(candidates)
-            del self.eval_pool[victim_name]
-            victim_path = self.dirs['eval_pool'] / victim_name
-            if victim_path.exists():
-                shutil.rmtree(victim_path)
+            protected = {'iter_0'}
+            sorted_names = sorted(
+                self.eval_pool.keys(),
+                key=lambda x: int(x.split('_')[1])
+            )
+            if sorted_names:
+                protected.add(sorted_names[-1])
+
+            candidates = [n for n in self.eval_pool.keys() if n not in protected]
+            if candidates:
+                victim_name = random.choice(candidates)
+                del self.eval_pool[victim_name]
+                victim_path = self.dirs['eval_pool'] / victim_name
+                if victim_path.exists():
+                    shutil.rmtree(victim_path)
 
         self.eval_pool[model_name] = jax.device_get(current_state)
 
     def save_eval_pool(self) -> None:
-        """Save any new models in the dict to disk."""
         if not hasattr(self, 'eval_pool') or not self.eval_pool:
             return
-
         for model_name, cpu_state in self.eval_pool.items():
             save_path = self.dirs['eval_pool'] / model_name
-
             if not save_path.exists():
                 self.checkpointer.save(save_path.resolve(), cpu_state)
-
         self.checkpointer.wait_until_finished()
 
-    def _load_random_opponent(self) -> str | None:
-        """Selects a random model from the eval pool and loads it into the elo_model."""
-        if not hasattr(self, 'eval_pool') or not self.eval_pool:
-            print("Eval pool is empty! Cannot load an opponent.")
-            return None
+    def _load_random_opponents(self, n: int) -> dict:
+        """Load n opponents: always include iter_0 and most recent, fill rest randomly."""
+        pool_names = list(self.eval_pool.keys())
+        if not pool_names:
+            return {}
 
-        opponent_name = random.choice(list(self.eval_pool.keys()))
-        cpu_state = self.eval_pool[opponent_name]
-        gpu_state = jax.device_put(cpu_state)
+        sorted_names = sorted(pool_names, key=lambda x: int(x.split('_')[1]))
 
+        anchors = []
+        if 'iter_0' in pool_names:
+            anchors.append('iter_0')
+        if sorted_names[-1] not in anchors:
+            anchors.append(sorted_names[-1])
+
+        remaining = [name for name in pool_names if name not in anchors]
+        random_picks = random.sample(remaining, min(n - len(anchors), len(remaining)))
+
+        selected = (anchors + random_picks)[:n]
+
+        result = {}
         graph_def, _ = nnx.split(self.model)
-        self.eval_model = nnx.merge(graph_def, gpu_state)
-        self.eval_model.eval()
+        for name in selected:
+            gpu_state = jax.device_put(self.eval_pool[name])
+            opponent_model = nnx.merge(graph_def, gpu_state)
+            opponent_model.eval()
+            result[name] = opponent_model
 
-        return opponent_name
+        return result
 
 
 @partial(nnx.jit, static_argnames=('num_simulations', 'env', 'batch_size', 'dirichlet_fraction'))
@@ -284,7 +355,6 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size,
         next_mask = t_mask | is_terminal
 
         key_A, key_B, next_key = jax.random.split(key, 3)
-
         is_p0 = (step_state.current_player[0] == 0)
 
         action = lax.cond(
@@ -310,7 +380,8 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size,
 
     termination_mask = jnp.zeros_like(state.terminated, dtype=jnp.bool_)
     init_rewards = jnp.zeros_like(state.rewards)
-    init_loop_vars = (state, rng_key, termination_mask, init_rewards)
-    _, _, _, final_rewards = lax.while_loop(cond_fn, step_fn, init_loop_vars)
+    _, _, _, final_rewards = lax.while_loop(
+        cond_fn, step_fn, (state, rng_key, termination_mask, init_rewards)
+    )
 
     return final_rewards
