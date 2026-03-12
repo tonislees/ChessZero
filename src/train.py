@@ -55,7 +55,6 @@ class Coach:
         graph_def, state = nnx.split(self.model)
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model = nnx.merge(graph_def, state)
-        self.current_lr = cfg.train.initial_learning_rate
         self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
 
         # Environment
@@ -95,11 +94,21 @@ class Coach:
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
 
     def _load_optimizer(self, load_checkpoint: bool):
+        total_training_steps = 400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps  # 400 iters
+
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=1e-4,
+            peak_value=2e-3,
+            warmup_steps=500,
+            decay_steps=total_training_steps,
+            end_value=1e-5
+        )
+
         optimizer = nnx.Optimizer(
             self.model,
             optax.chain(
                 optax.clip_by_global_norm(1.0),
-                optax.adamw(learning_rate=self.current_lr)
+                optax.adamw(learning_rate=schedule)
             ),
             wrt=nnx.Param
         )
@@ -122,25 +131,6 @@ class Coach:
         print(dirs)
         return dirs[-1]
 
-    def _maybe_reduce_lr(self):
-        history = self.metrics_tracker.metrics_history['total_loss']
-        if len(history) < 20:
-            return
-        recent = sum(history[-10:]) / 10
-        previous = sum(history[-20:-10]) / 10
-        improvement = (previous - recent) / previous
-        if improvement < 0.005:
-            self.current_lr = max(self.current_lr * 0.5, 1e-5)
-            self.optimizer = nnx.Optimizer(
-                self.model,
-                optax.chain(
-                    optax.clip_by_global_norm(1.0),
-                    optax.adamw(learning_rate=self.current_lr)
-                ),
-                wrt=nnx.Param
-            )
-            print(f"\n    LR reduced to {self.current_lr}")
-
     def _load_model(self, model_dir: Path, load_checkpoint: bool) -> HnefataflZeroNet:
         model = HnefataflZeroNet(
             depth=self.cfg.model.depth,
@@ -154,7 +144,13 @@ class Coach:
                 model,
                 optax.chain(
                     optax.clip_by_global_norm(1.0),
-                    optax.adamw(learning_rate=self.cfg.train.initial_learning_rate)
+                    optax.adamw(learning_rate=optax.warmup_cosine_decay_schedule(
+                        init_value=1e-4,
+                        peak_value=2e-3,
+                        warmup_steps=500,
+                        decay_steps=400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps,
+                        end_value=1e-5
+                    ))
                 ),
                 wrt=nnx.Param
             )
@@ -163,12 +159,10 @@ class Coach:
             abstract_checkpoint = {
                 'model': abstract_state,
                 'optimizer': abstract_opt_state,
-                'lr': 0.0
             }
             restored = self.checkpointer.restore(model_dir, abstract_checkpoint)
 
             model = nnx.merge(graph_def, restored['model'])
-            self.current_lr = restored['lr']
             self._restored_opt_state = restored['optimizer']
 
         return model
@@ -185,7 +179,6 @@ class Coach:
             self._run_training_loop()
 
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
-            self._maybe_reduce_lr()
 
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
@@ -307,7 +300,6 @@ class Coach:
         checkpoint = {
             'model': model_state,
             'optimizer': opt_state,
-            'lr': self.current_lr
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
         self.evaluator.save_eval_pool()
