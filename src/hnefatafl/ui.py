@@ -104,6 +104,20 @@ class HnefataflUI:
                 pygame.draw.circle(self.screen, COLOR_DEFENDER, center, radius)
                 pygame.draw.circle(self.screen, (0, 0, 0), center, radius, 1)
 
+    def check_game_over(self):
+        """Checks if the game has reached a terminal state and updates the UI."""
+        if not self.game_over and self.engine.env.game.is_terminal(self.engine.game_state):
+            self.game_over = True
+            rewards = self.engine.env.game.rewards(self.engine.game_state)
+
+            if rewards[0] > 0:
+                winner = "ATTACKERS WON!"
+            elif rewards[1] > 0:
+                winner = "DEFENDERS WON!"
+            else:
+                winner = "DRAW!"
+            print(f"\n=== {winner} ===")
+
     def handle_click(self, pos):
         if self.game_over:
             return
@@ -150,31 +164,33 @@ class HnefataflUI:
             step_key, self.engine.key_env = jax.random.split(self.engine.key_env)
             self.engine.state = self.engine.step_fn(self.engine.state, action_label, step_key)
             self.engine.game_state = self.engine.state._x
-
-            if self.engine.env.game.is_terminal(self.engine.game_state):
-                self.game_over = True
-                rewards = self.engine.env.game.rewards(self.engine.game_state)
-
-                if rewards[0] > 0:
-                    winner = "ATTACKERS WON!"
-                elif rewards[1] > 0:
-                    winner = "DEFENDERS WON!"
-                else:
-                    winner = "DRAW!"
-                print(f"\n=== {winner} ===")
+            self.check_game_over()
 
     def run(self):
         while self.running:
             self.clock.tick(FPS)
+
+            current_turn = int(self.engine.game_state.color)
+            if not self.game_over and current_turn == getattr(self.engine, 'ai_color', 0):
+                self.draw_board()
+                pygame.display.flip()
+
+                uci_move = self.engine.make_ai_move()
+                self.move_history.append(uci_move)
+
+                self.check_game_over()
+
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
-                        self.handle_click(event.pos)
+                        if int(self.engine.game_state.color) != getattr(self.engine, 'ai_color', 0):
+                            self.handle_click(event.pos)
                 elif event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_r:
-                        self.engine.reset()
+                        if hasattr(self.engine, 'reset'):
+                            self.engine.reset()
                         self.game_over = False
                         self.move_history = []
                         self.selected_sq = None

@@ -106,14 +106,14 @@ class Evaluator:
         self._log_eval_results(current_model, opponent_summaries)
 
         self._generate_minimal_pgn(all_match_data)
-        ratings = self._run_bayeselo()
+        ratings = self.run_bayeselo(self.dirs['pgn'])
 
         elo = ratings.get(current_model, self.last_elo)
         elo_delta = elo - self.last_elo
         self.last_elo = elo
 
         print(f"  {'─' * 48}")
-        print(f"  Elo: {elo:+d}  (Δ {elo_delta:+d})")
+        print(f"  Elo: {elo - ratings.get('iter_0', 0):+d}  (Δ {elo_delta:+d})")
         print(f"  {'─' * 48}")
 
         self._add_to_eval_pool(iteration)
@@ -202,9 +202,6 @@ class Evaluator:
         att_winrate = att_wins / att_total if att_total > 0 else 0.0
         def_winrate = def_wins / def_total if def_total > 0 else 0.0
 
-        weaker_side = "Attacker" if att_winrate < def_winrate else "Defender"
-        gap = abs(att_winrate - def_winrate)
-
         print(f"\n  Attacker win rate: {att_winrate:.1%}   Defender win rate: {def_winrate:.1%}")
         print()
 
@@ -220,8 +217,8 @@ class Evaluator:
                 f.write(f'[Result "{result_str}"]\n')
                 f.write("1. d4 d5\n\n")
 
-    def _run_bayeselo(self):
-        commands = f"""readpgn {self.dirs['pgn']}
+    def run_bayeselo(self, pgn_path: Path):
+        commands = f"""readpgn {pgn_path}
 elo
 mm
 exactdist

@@ -44,7 +44,8 @@ class Coach:
             'plots': dir_safe('plots', metrics_dir),
             'metrics': dir_safe('metrics', metrics_dir),
             'bayeselo': root_dir / 'bayeselo',
-            'pgn': root_dir / 'game_results.pgn'
+            'pgn': root_dir / 'game_results.pgn',
+            'training': dir_safe('training_data', root_dir)
         }
         if not cfg.train.load_checkpoint:
             self.dirs['pgn'].unlink(missing_ok=True)
@@ -56,6 +57,9 @@ class Coach:
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model = nnx.merge(graph_def, state)
         self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
+        opt_graph_def, opt_state = nnx.split(self.optimizer)
+        opt_state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), opt_state)
+        self.optimizer = nnx.merge(opt_graph_def, opt_state)
 
         # Environment
         self.env = Hnefatafl()
@@ -69,8 +73,8 @@ class Coach:
 
         # Setup
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
-        self.metrics_tracker = MetricsTracker(cfg, self.dirs)
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
+        self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
         self.reward_consts = [1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r]
 
         # Buffer
@@ -309,7 +313,7 @@ class Coach:
 @hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
     coach = Coach(cfg)
-    coach.train()
+    coach.metrics_tracker.plot_elo(1024, 256)
 
 
 if __name__ == '__main__':

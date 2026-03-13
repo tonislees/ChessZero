@@ -1,19 +1,30 @@
+from pathlib import Path
+
 import jax
+import optax
 from flax import nnx
 import jax.numpy as jnp
+import orbax.checkpoint as ocp
 
 from src.hnefatafl.hnefatafl import Hnefatafl
 from src.hnefatafl.hnefatafl_jax import GameState, Action, BOARD_EDGE
 from src.hnefatafl.ui import HnefataflUI
+from src.mcts import run_mcts
+from src.model import HnefataflZeroNet
 
 FILE_LETTERS = 'abcdefghijk'
 
 
 class PlayHnefatafl:
-    def __init__(self):
+    def __init__(self, ai_color=-1):
         self.env = Hnefatafl()
         self.seed = 42
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
+        self.mcts_sims = 256
+        root_dir = self.root = Path(__file__).resolve().parents[2]
+        checkpoint_path = root_dir / 'training_data' / 'model' / 'checkpoints'
+        self.model = self.load_model(checkpoint_path)
+        self.ai_color = ai_color
         self.key_env = jax.random.PRNGKey(self.seed + 1)
         batched_state = jax.jit(jax.vmap(self.env.init))(
             jax.random.split(self.key_env, 1)
@@ -23,6 +34,71 @@ class PlayHnefatafl:
         self.game_state: GameState = self.state._x
         self.board_edge = BOARD_EDGE
         self.columns = {FILE_LETTERS[i]: i for i in range(BOARD_EDGE)}
+
+    def load_model(self, checkpoint_path: Path):
+        model = HnefataflZeroNet(
+            depth=8,
+            filter_count=128,
+            rngs=self.rngs
+        )
+        model.eval()
+
+        if checkpoint_path and Path(checkpoint_path).exists():
+            print(f"Loading checkpoint...")
+            checkpointer = ocp.StandardCheckpointer()
+            graph_def, abstract_state = nnx.split(model)
+            temp_opt = nnx.Optimizer(
+                model,
+                optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adamw(learning_rate=optax.warmup_cosine_decay_schedule(
+                        init_value=1e-4,
+                        peak_value=2e-3,
+                        warmup_steps=500,
+                        decay_steps=100000,
+                        end_value=1e-5
+                    ))
+                ),
+                wrt=nnx.Param
+            )
+            _, abstract_opt_state = nnx.split(temp_opt)
+            abstract_checkpoint = {
+                'model': abstract_state,
+                'optimizer': abstract_opt_state,
+            }
+            restored = checkpointer.restore(checkpoint_path, abstract_checkpoint)
+            model = nnx.merge(graph_def, restored['model'])
+        else:
+            print("No checkpoint loaded. Playing against randomly initialized network.")
+
+        return model
+
+    def make_ai_move(self):
+        print("AI is thinking...")
+        self.key_env, search_key = jax.random.split(self.key_env)
+        graph_def, model_state = nnx.split(self.model)
+
+        mcts_output = run_mcts(
+            graph_def=graph_def,
+            model_state=model_state,
+            env_state=self.state,
+            rng_key=search_key,
+            num_simulations=self.mcts_sims,
+            env=self.env,
+            batch_size=1,
+            dirichlet_fraction=0.0,
+            attacker_explore=False
+        )
+
+        action_label = mcts_output.action[0]
+
+        self.state = self.step_fn(self.state, action_label)
+        self.game_state = self.state._x
+
+        action_obj = Action.from_label(action_label)
+        uci_move = self._sq_to_uci(int(action_obj.from_sq)) + self._sq_to_uci(int(action_obj.to_sq))
+        print(f"AI played: {uci_move}")
+        return uci_move
 
     def reset(self):
         batched_state = jax.jit(jax.vmap(self.env.init))(
@@ -116,13 +192,25 @@ class PlayHnefatafl:
     def game_loop(self):
         self.print_board()
         while True:
-            self.show_legal_moves()
-            print('Attacker to move' if self.game_state.color < 0 else 'Defender to move')
-            move = input('Your move: ')
-            self.make_move(move)
+            current_color = int(self.game_state.color)
+            if current_color == self.ai_color:
+                self.make_ai_move()
+            else:
+                self.show_legal_moves()
+                print('Attacker to move' if current_color < 0 else 'Defender to move')
+                move = input('Your move: ')
+                self.make_move(move)
+
             self.print_board()
+
             if self.env.game.is_terminal(self.game_state):
-                print('Defenders' if self.env.game.rewards(self.game_state)[0] < 0 else 'Attackers' + ' won')
+                rewards = self.env.game.rewards(self.game_state)
+                if rewards[0] > 0:
+                    print('Attackers won')
+                elif rewards[1] > 0:
+                    print('Defenders won')
+                else:
+                    print('Draw')
                 break
 
     def play_ui(self):
@@ -180,5 +268,5 @@ class PlayHnefatafl:
 
 
 if __name__ == '__main__':
-    game = PlayHnefatafl()
+    game = PlayHnefatafl(ai_color=1)
     game.play_ui()

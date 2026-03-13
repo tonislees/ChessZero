@@ -8,6 +8,7 @@ game_results.pgn
 commands.txt
 config.yaml
 train.sh
+/training_data
 GEMINI.md
 
 # Byte-compiled / optimized / DLL files

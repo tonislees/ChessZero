@@ -6,9 +6,11 @@ from flax import nnx
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 
+from src.evaluation import Evaluator
+
 
 class MetricsTracker:
-    def __init__(self, cfg: DictConfig, dirs: dict[str, Path]):
+    def __init__(self, cfg: DictConfig, dirs: dict[str, Path], evaluator: Evaluator):
         self.dirs = dirs
         self.cfg = cfg
         self.metrics_history = self._load_metrics(cfg.train.load_checkpoint)
@@ -17,6 +19,7 @@ class MetricsTracker:
             policy_loss=nnx.metrics.Average(argname='policy_loss'),
             value_loss=nnx.metrics.Average(argname='value_loss'),
         )
+        self.evaluator = evaluator
 
     def update_frames(self, frame_count: int) -> None:
         """
@@ -50,6 +53,59 @@ class MetricsTracker:
         self.metrics_history['value_loss'].append(float(current_metrics['value_loss']))
 
         self.metrics.reset()
+
+    def plot_elo(self, batch_size: int, train_steps: int):
+        ratings = self.evaluator.run_bayeselo(self.dirs['training'] / 'metrics' / 'game_results.pgn')
+        frames_per_iter = batch_size * train_steps
+        metrics_dir = self.dirs['training'] / 'metrics'
+        metrics_files = sorted(metrics_dir.glob("metrics_*.json"))
+        with open(metrics_files[-1]) as f:
+            history = json.load(f)
+
+        # Elo
+        sorted_items = sorted(ratings.items(), key=lambda x: int(x[0].split('_')[1]))
+        iters = [int(name.split('_')[1]) for name, _ in sorted_items]
+        elos = [e - min(ratings.values()) for _, e in sorted_items]
+        elo_frames = [i * frames_per_iter / 1e6 for i in iters]
+
+        # Win/draw rates
+        n_iters = len(history['attacker_win_rate'])
+        rate_frames = [(i + 1) * frames_per_iter / 1e6 for i in range(n_iters)]
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+
+        # Elo
+        ax1.plot(elo_frames, elos, marker='o', linewidth=2, color='royalblue')
+        ax1.set_ylabel("Elo")
+        ax1.set_xlabel("Frames (millions)")
+        ax1.set_title("Elo Rating")
+        ax1.grid(True, alpha=0.3)
+        ax1.set_aspect('auto')
+
+        # Stacked area win rates
+        ax2.stackplot(
+            rate_frames,
+            history['attacker_win_rate'],
+            history['draw_rate'],
+            history['defender_win_rate'],
+            labels=['Attacker Win', 'Draw', 'Defender Win'],
+            colors=['#4CAF50', '#9E9E9E', '#F44336'],
+            alpha=0.85
+        )
+        ax2.set_ylabel("Rate")
+        ax2.set_xlabel("Frames (millions)")
+        ax2.set_title("Game Outcomes")
+        ax2.set_ylim(0, 1)
+        ax2.legend(loc='upper left')
+        ax2.grid(True, alpha=0.2)
+
+        plt.tight_layout(w_pad=4)
+
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        plot_path = self.dirs['plots'] / f"Training_Summary_{timestamp}.pdf"
+        plt.savefig(plot_path, dpi=150)
+        plt.close(fig)
+
 
     def plot_metrics(self):
         def smooth(scalars, weight=0.9):
