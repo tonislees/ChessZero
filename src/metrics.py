@@ -59,6 +59,8 @@ class MetricsTracker:
         frames_per_iter = batch_size * train_steps
         metrics_dir = self.dirs['training'] / 'metrics'
         metrics_files = sorted(metrics_dir.glob("metrics_*.json"))
+        if not metrics_files:
+            return
         with open(metrics_files[-1]) as f:
             history = json.load(f)
 

@@ -313,7 +313,7 @@ class Coach:
 @hydra.main(version_base=None, config_path='..', config_name='config')
 def main(cfg: DictConfig):
     coach = Coach(cfg)
-    coach.metrics_tracker.plot_elo(1024, 256)
+    coach.train()
 
 
 if __name__ == '__main__':
