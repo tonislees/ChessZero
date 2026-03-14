@@ -174,7 +174,7 @@ class Coach:
     def train(self):
         eval_interval = self.cfg.train.eval_interval
         eval_start = self.cfg.train.eval_start
-        draw_penalty_start = self.cfg.draw_penalty_start
+        draw_penalty_start = self.cfg.train.draw_penalty_start
         for i in range(self.cfg.train.iterations):
             start_time = time.time()
             iteration = i + self.last_iteration + 1
