@@ -8,6 +8,7 @@ from jax import Array, lax
 BOARD_EDGE = 9
 BOARD_SIZE = BOARD_EDGE * BOARD_EDGE # 81
 THRONE = BOARD_SIZE // 2 # 40
+MAX_SHIELD_WALL_PARTNERS = BOARD_EDGE - 4
 
 ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 
@@ -387,7 +388,7 @@ class Game:
         repetition = (state.hash_history == _zobrist_hash(state)).all(axis=1).sum() - 1
         terminated |= repetition >= 2
 
-        # Move count conditions
+        # Draw conditions
         terminated |= state.half_move_count >= MAX_HALF_MOVE_COUNT
         terminated |= MAX_TERMINATION_STEPS <= state.step_count
 
@@ -411,15 +412,13 @@ class Game:
         attacker_won |= no_moves & (state.color == 1)
         defender_won |= no_moves & (state.color == -1)
 
-        no_win = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
-        no_win &= (~attacker_won) & (~defender_won)
+        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        draw = draw & (~attacker_won) & (~defender_won)
 
-        defender_won |= no_win
+        terminated = attacker_won | defender_won | draw
 
-        terminated = attacker_won | defender_won
-
-        attacker_score = jnp.where(attacker_won, 1.0, -1.0)
-        defender_score = jnp.where(defender_won, 1.0, -1.0)
+        attacker_score = jnp.where(attacker_won, 1.0, jnp.where(defender_won, -1.0, 0.0))
+        defender_score = jnp.where(defender_won, 1.0, jnp.where(attacker_won, -1.0, 0.0))
 
         return terminated, jnp.array([attacker_score, defender_score], dtype=jnp.float32)
 
@@ -436,8 +435,8 @@ class Game:
         rep_loss = repetition >= 2
         no_moves = ~state.legal_action_mask.any()
 
-        # Move count condition
-        no_win = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
+        # Technical Draws
+        draw = (state.half_move_count >= MAX_HALF_MOVE_COUNT) | (state.step_count >= MAX_TERMINATION_STEPS)
 
         attacker_score = jnp.float32(0.0)
         defender_score = jnp.float32(0.0)
@@ -457,9 +456,9 @@ class Game:
         defender_score = lax.select(defender_won, 1.0, defender_score)
         attacker_score = lax.select(defender_won, -1.0, attacker_score)
 
-        no_win &= (~attacker_won) & (~defender_won)
-        attacker_score = lax.select(no_win, -1.0, attacker_score)
-        defender_score = lax.select(no_win, 1.0, defender_score)
+        is_draw = draw & (~attacker_won) & (~defender_won)
+        attacker_score = lax.select(is_draw, 0.0, attacker_score)
+        defender_score = lax.select(is_draw, 0.0, defender_score)
 
         return jnp.array([attacker_score, defender_score])
 

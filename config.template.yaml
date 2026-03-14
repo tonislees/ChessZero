@@ -31,6 +31,4 @@ train:
   load_checkpoint: False
   eval_interval: 5
   eval_start: 25
-
-interface:
-  start_player: white
+  draw_penalty_start: 15

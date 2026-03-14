@@ -70,7 +70,7 @@ class MetricsTracker:
         elos = [e - min(ratings.values()) for _, e in sorted_items]
         elo_frames = [i * frames_per_iter / 1e6 for i in iters]
 
-        # Win rates
+        # Win/draw rates
         n_iters = len(history['attacker_win_rate'])
         rate_frames = [(i + 1) * frames_per_iter / 1e6 for i in range(n_iters)]
 
@@ -88,8 +88,9 @@ class MetricsTracker:
         ax2.stackplot(
             rate_frames,
             history['attacker_win_rate'],
+            history['draw_rate'],
             history['defender_win_rate'],
-            labels=['Attacker Win', 'Defender Win'],
+            labels=['Attacker Win', 'Draw', 'Defender Win'],
             colors=['#4CAF50', '#9E9E9E', '#F44336'],
             alpha=0.85
         )
@@ -174,6 +175,7 @@ class MetricsTracker:
             'value_loss': [],
             'attacker_win_rate': [],
             'defender_win_rate': [],
+            'draw_rate': [],
             'elo_evaluation': [],
             'frames': []
         }
