@@ -25,7 +25,6 @@ class Evaluator:
         self.model = model
         self.checkpointer = checkpointer
         self.env = env
-        self.last_elo = 0
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
         self._add_to_eval_pool(iteration=0)
 
@@ -108,9 +107,9 @@ class Evaluator:
         self._generate_minimal_pgn(all_match_data)
         ratings = self.run_bayeselo(self.dirs['pgn'])
 
-        elo = ratings.get(current_model, self.last_elo)
-        elo_delta = elo - self.last_elo
-        self.last_elo = elo
+        elo = ratings.get(current_model, 0)
+        last_elo = ratings.get(f'iter_{iteration - 1}')
+        elo_delta = elo - last_elo
 
         print(f"  {'─' * 48}")
         print(f"  Elo: {elo - ratings.get('iter_0', 0):+d}  (Δ {elo_delta:+d})")
