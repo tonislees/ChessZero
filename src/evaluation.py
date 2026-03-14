@@ -51,7 +51,7 @@ class Evaluator:
         if not opponents:
             print("    Skipping evaluation — eval pool empty.")
             self._add_to_eval_pool(iteration)
-            return self.last_elo
+            return 0
 
         games_per_opponent = self.cfg.train.batch_size // num_opponents
 
@@ -108,7 +108,7 @@ class Evaluator:
         ratings = self.run_bayeselo(self.dirs['pgn'])
 
         elo = ratings.get(current_model, 0)
-        last_elo = ratings.get(f'iter_{iteration - 1}')
+        last_elo = ratings.get(f'iter_{iteration - 1}', 0)
         elo_delta = elo - last_elo
 
         print(f"  {'─' * 48}")
