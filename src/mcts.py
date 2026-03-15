@@ -54,7 +54,7 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
 def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
              batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
-             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0])):
+             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0, 0.0, 0.0])):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 

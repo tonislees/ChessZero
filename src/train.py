@@ -75,7 +75,7 @@ class Coach:
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
         self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
-        self.reward_consts = [1, -1, 1, -1, 1, -1] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
+        self.reward_consts = [1, -1, 1, -1, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
 
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
