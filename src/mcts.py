@@ -22,8 +22,8 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     att_raw = raw_rewards[:, 0]
     def_raw = raw_rewards[:, 1]
 
-    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, 0.0))
-    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, 0.0))
+    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, -0.3))
+    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, -0.3))
     scaled_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
 
     next_state = embedding.replace(
