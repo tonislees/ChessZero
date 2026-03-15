@@ -80,7 +80,7 @@ class Coach:
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
-            max_length=min_buffer_size * 4,
+            max_length=min_buffer_size * 8,
             min_length=min_buffer_size,
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
@@ -112,7 +112,7 @@ class Coach:
             self.model,
             optax.chain(
                 optax.clip_by_global_norm(1.0),
-                optax.adamw(learning_rate=schedule)
+                optax.adamw(learning_rate=schedule, weight_decay=1e-4)
             ),
             wrt=nnx.Param
         )
