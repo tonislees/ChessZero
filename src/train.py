@@ -52,14 +52,10 @@ class Coach:
 
         # Model & optimizer
         self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
-        self.eval_model = None
-        graph_def, state = nnx.split(self.model)
-        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
-        self.model = nnx.merge(graph_def, state)
         self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
-        # opt_graph_def, opt_state = nnx.split(self.optimizer)
-        # opt_state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), opt_state)
-        # self.optimizer = nnx.merge(opt_graph_def, opt_state)
+        graph_def, state = nnx.split((self.model, self.optimizer))
+        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
+        self.model, self.optimizer = nnx.merge(graph_def, state)
 
         # Environment
         self.env = Hnefatafl()
@@ -118,8 +114,7 @@ class Coach:
         )
 
         if load_checkpoint and hasattr(self, '_restored_opt_state'):
-            opt_graph_def, _ = nnx.split(optimizer)
-            optimizer = nnx.merge(opt_graph_def, self._restored_opt_state)
+            nnx.update(optimizer, self._restored_opt_state)
             del self._restored_opt_state
 
         return optimizer
