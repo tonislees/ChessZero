@@ -53,7 +53,6 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
 
 
 def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
-             batch_size: int, dirichlet_fraction, attacker_explore: bool = True,
              reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0, 0.0, 0.0])):
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
@@ -63,38 +62,13 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
     role = (env_state._x.color + 1) // 2
     root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), role)
 
-    is_attacker = (env_state._x.color == -1)
-
-    legal_mask = env_state.legal_action_mask
-    apply_dirichlet = is_attacker & attacker_explore
-    num_actions = root_logits.shape[-1]
-
-    noise_key, rng_key = jax.random.split(rng_key)
-    dirichlet_noise = jax.random.dirichlet(
-        noise_key,
-        alpha=jnp.full((num_actions,), 0.3),
-        shape=(batch_size,)
-    )
-
-    probs = jax.nn.softmax(root_logits)
-    mixed_probs = (1 - dirichlet_fraction) * probs + dirichlet_fraction * dirichlet_noise
-
-    mixed_probs = jnp.where(legal_mask, mixed_probs, 1e-8)
-    mixed_probs = mixed_probs / jnp.sum(mixed_probs, axis=-1, keepdims=True)
-
-    noisy_logits = jnp.log(mixed_probs)
-
-    final_root_logits = jnp.where(apply_dirichlet[:, None], noisy_logits, root_logits)
-
     root = mctx.RootFnOutput(
-        prior_logits=final_root_logits,
+        prior_logits=root_logits,
         value=root_value,
         embedding=env_state
     )
 
     rec_fn = partial(recurrent_fn, env=env, graph_def=graph_def, reward_consts=reward_consts)
-
-    g_scale = jnp.where(apply_dirichlet[:, None], 2.0, 1.0)
 
     policy_output = mctx.gumbel_muzero_policy(
         params=model_state,
@@ -103,8 +77,7 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
         recurrent_fn=rec_fn,
         num_simulations=num_simulations,
         invalid_actions=~env_state.legal_action_mask,
-        qtransform=mctx.qtransform_completed_by_mix_value,
-        gumbel_scale=g_scale
+        qtransform=mctx.qtransform_completed_by_mix_value
     )
 
     return policy_output

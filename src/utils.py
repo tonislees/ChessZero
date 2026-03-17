@@ -21,11 +21,17 @@ def loss_fn(model: nnx.Module, batch: dict, train=True):
     policy_loss = optax.softmax_cross_entropy(
         logits=masked_logits, labels=batch['policy_target']
     ).mean()
+    value_sq = value.squeeze()
     value_loss = optax.l2_loss(
-        predictions=value.squeeze(), targets=batch['value_target']
+        predictions=value_sq, targets=batch['value_target']
     ).mean()
     total_loss = policy_loss + value_loss
-    return total_loss, (policy_loss, value_loss)
+
+    pred_sign = jnp.sign(jnp.round(value_sq, decimals=1))
+    target_sign = jnp.sign(batch['value_target'])
+    value_acc = (pred_sign == target_sign).mean()
+
+    return total_loss, (policy_loss, value_loss, value_acc)
 
 
 def dir_safe(dir_name: str, parent_dir: Path) -> Path:
@@ -49,25 +55,6 @@ def add_to_buffer_cpu(buffer_state, transitions, buffer):
 @nnx.jit
 def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict):
     grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
-    (loss, (p_loss, v_loss)), grads = grad_fn(model, batch)
+    (loss, (p_loss, v_loss, v_acc)), grads = grad_fn(model, batch)
     optimizer.update(model, grads)
-    return loss, p_loss, v_loss
-
-
-def calculate_dynamic_rewards(p_a_win: float, p_d_win: float) -> tuple[float, float, float, float]:
-    """
-    Calculates dynamic normalizer for results with the formula:
-    (p_win x r_win) + (p_loss x r_loss) = 0, where p_win/p_loss are of the advantaged side.
-    Returns [r_a_win, r_a_loss, r_d_win, r_d_loss]
-    """
-    if p_a_win == 0.0 or p_d_win == 0.0:
-        return 1.0, -1.0, 1.0, -1.0
-
-    if p_a_win > p_d_win: # Attacker has the advantage
-        r_a_loss = -1.0
-        r_a_win = p_d_win / p_a_win
-        return r_a_win, r_a_loss, -r_a_loss, -r_a_win
-    else: # Defender has the advantage
-        r_d_loss = -1.0
-        r_d_win = p_a_win / p_d_win
-        return -r_d_loss, -r_d_win, r_d_win, r_d_loss
+    return loss, p_loss, v_loss, v_acc

@@ -4,6 +4,7 @@ import jax
 from flax import nnx
 from jax import numpy as jnp
 
+from src.hnefatafl.hnefatafl_jax import MAX_HALF_MOVE_COUNT
 from src.mcts import run_mcts
 from src.utils import policy_value_by_player
 
@@ -13,16 +14,15 @@ def set_pbar(pbar):
     global _self_play_pbar
     _self_play_pbar = pbar
 
-@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env', 'attacker_explore'))
-def self_play(model, env_state, rng_key, num_steps, num_simulations,
-              env, batch_size, reward_consts, dirichlet_fraction, attacker_explore):
+@partial(nnx.jit, static_argnames=('num_steps', 'batch_size', 'num_simulations', 'env'))
+def self_play(model, env_state, rng_key, num_steps, num_simulations, env, batch_size, reward_consts):
     graph_def, model_state = nnx.split(model)
 
     def step_fn(state, key):
         key_reset, key_search = jax.random.split(key)
 
-        mcts_output = run_mcts(graph_def, model_state, state, key_search, num_simulations,
-                               env, batch_size, dirichlet_fraction, attacker_explore, reward_consts=reward_consts)
+        mcts_output = run_mcts(graph_def, model_state, state, key_search,
+                               num_simulations, env, reward_consts=reward_consts)
         actions = mcts_output.action
         next_env_state = jax.vmap(env.step)(state, actions)
 
@@ -55,14 +55,25 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
         current_player_rewards = scaled_player_rewards[batch_indices, state.current_player]
         attacker_rewards = att_raw
 
+        probs = mcts_output.action_weights
+        entropy = -jnp.sum(probs * jnp.log(probs + 1e-8), axis=-1)
+
+        pieces_left = jnp.sum(next_env_state._x.board != 0, axis=-1)
+
+        is_half_move_draw = next_env_state.terminated & (next_env_state._x.half_move_count >= MAX_HALF_MOVE_COUNT)
+
         transition = {
             "observation": state.observation,
             "policy_target": mcts_output.action_weights,
             "reward": current_player_rewards,
             "attacker_reward": attacker_rewards,
             "terminated": next_env_state.terminated,
+            "step_count": next_env_state._step_count,
             "legal_action_mask": state.legal_action_mask,
-            "player": (state._x.color + 1) // 2
+            "player": (state._x.color + 1) // 2,
+            "entropy": entropy,
+            "pieces_left": pieces_left,
+            "is_half_move_draw": is_half_move_draw
         }
 
         def update_pbar(_):
@@ -93,4 +104,13 @@ def self_play(model, env_state, rng_key, num_steps, num_simulations,
 
     _, final_transitions = jax.lax.scan(step_back, next_value, history, reverse=True)
 
-    return final_env_state, final_transitions, history['terminated'], history['attacker_reward']
+    return (
+        final_env_state,
+        final_transitions,
+        history['terminated'],
+        history['attacker_reward'],
+        history['step_count'],
+        history['entropy'],
+        history['pieces_left'],
+        history['is_half_move_draw']
+    )

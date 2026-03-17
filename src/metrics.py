@@ -18,6 +18,7 @@ class MetricsTracker:
             total_loss=nnx.metrics.Average(argname='total_loss'),
             policy_loss=nnx.metrics.Average(argname='policy_loss'),
             value_loss=nnx.metrics.Average(argname='value_loss'),
+            value_acc=nnx.metrics.Average(argname='value_acc')
         )
         self.evaluator = evaluator
 
@@ -32,14 +33,15 @@ class MetricsTracker:
 
         self.metrics_history['frames'].append(current_total + frame_count)
 
-    def update_step(self, total_loss: float, policy_loss: float, value_loss: float) -> None:
+    def update_step(self, total_loss: float, policy_loss: float, value_loss: float, value_acc: float) -> None:
         """
         Feeds the current batch's outputs into the MultiMetric.
         """
         self.metrics.update(
             total_loss=total_loss,
             policy_loss=policy_loss,
-            value_loss=value_loss
+            value_loss=value_loss,
+            value_acc=value_acc
         )
 
     def compute_and_record(self) -> None:
@@ -51,6 +53,7 @@ class MetricsTracker:
         self.metrics_history['total_loss'].append(float(current_metrics['total_loss']))
         self.metrics_history['policy_loss'].append(float(current_metrics['policy_loss']))
         self.metrics_history['value_loss'].append(float(current_metrics['value_loss']))
+        self.metrics_history['value_acc'].append(float(current_metrics['value_acc']))
 
         self.metrics.reset()
 
@@ -173,11 +176,12 @@ class MetricsTracker:
             'total_loss': [],
             'policy_loss': [],
             'value_loss': [],
+            'value_acc': [],
             'attacker_win_rate': [],
             'defender_win_rate': [],
             'draw_rate': [],
-            'elo_evaluation': [],
-            'frames': []
+            'frames': [],
+            'game_lengths': []
         }
 
         if not load_checkpoint or not self.dirs['metrics'].exists():

@@ -84,10 +84,7 @@ class PlayHnefatafl:
             env_state=self.state,
             rng_key=search_key,
             num_simulations=self.mcts_sims,
-            env=self.env,
-            batch_size=1,
-            dirichlet_fraction=0.0,
-            attacker_explore=False
+            env=self.env
         )
 
         action_label = mcts_output.action[0]

@@ -42,16 +42,11 @@ class Evaluator:
             current_player=player_order[:, 0]
         )
 
-    def evaluate_model(self, iteration: int) -> int:
+    def evaluate_model(self, iteration: int):
         current_model = f"iter_{iteration}"
         num_opponents = min(4, len(self.eval_pool))
         opponents = self._load_random_opponents(num_opponents)
         eval_sims = self.cfg.mcts.simulations // 2
-
-        if not opponents:
-            print("    Skipping evaluation — eval pool empty.")
-            self._add_to_eval_pool(iteration)
-            return 0
 
         games_per_opponent = self.cfg.train.batch_size // num_opponents
 
@@ -79,9 +74,7 @@ class Evaluator:
                 state=p0_state,
                 rng_key=self.rngs.default(),
                 num_simulations=eval_sims,
-                env=self.env,
-                batch_size=games_per_opponent,
-                dirichlet_fraction=0.0
+                env=self.env
             ))
             rewards_p1 = jax.device_get(evaluate(
                 model_A=self.model,
@@ -89,9 +82,7 @@ class Evaluator:
                 state=p1_state,
                 rng_key=self.rngs.default(),
                 num_simulations=eval_sims,
-                env=self.env,
-                batch_size=games_per_opponent,
-                dirichlet_fraction=0.0
+                env=self.env
             ))
 
             match_data, summary = self._get_eval_metrics(
@@ -116,7 +107,6 @@ class Evaluator:
         print(f"  {'─' * 48}")
 
         self._add_to_eval_pool(iteration)
-        return elo
 
     @staticmethod
     def _get_eval_metrics(rewards_p0: jax.Array, rewards_p1: jax.Array,
@@ -330,8 +320,8 @@ x
         return result
 
 
-@partial(nnx.jit, static_argnames=('num_simulations', 'env', 'batch_size', 'dirichlet_fraction'))
-def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size, dirichlet_fraction):
+@partial(nnx.jit, static_argnames=('num_simulations', 'env'))
+def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
     graph_def_A, model_A_state = nnx.split(model_A)
     graph_def_B, model_B_state = nnx.split(model_B)
 
@@ -349,10 +339,8 @@ def evaluate(model_A, model_B, state, rng_key, num_simulations, env, batch_size,
 
         action = lax.cond(
             is_p0,
-            lambda: run_mcts(graph_def_A, model_A_state, step_state, key_A, num_simulations, env,
-                             batch_size, dirichlet_fraction, attacker_explore=False).action,
-            lambda: run_mcts(graph_def_B, model_B_state, step_state, key_B, num_simulations, env,
-                             batch_size, dirichlet_fraction, attacker_explore=False).action
+            lambda: run_mcts(graph_def_A, model_A_state, step_state, key_A, num_simulations, env).action,
+            lambda: run_mcts(graph_def_B, model_B_state, step_state, key_B, num_simulations, env).action
         )
 
         def update_pbar(_):

@@ -18,7 +18,7 @@ from src.hnefatafl.hnefatafl import Hnefatafl
 from src.metrics import MetricsTracker
 from src.model import HnefataflZeroNet
 from src.self_play import self_play, set_pbar
-from src.utils import dir_safe, add_to_buffer_cpu, train_step, calculate_dynamic_rewards
+from src.utils import dir_safe, add_to_buffer_cpu, train_step
 
 
 class Coach:
@@ -50,29 +50,6 @@ class Coach:
         if not cfg.train.load_checkpoint:
             self.dirs['pgn'].unlink(missing_ok=True)
 
-        # Model & optimizer
-        self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
-        self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
-        graph_def, state = nnx.split((self.model, self.optimizer))
-        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
-        self.model, self.optimizer = nnx.merge(graph_def, state)
-
-        # Environment
-        self.env = Hnefatafl()
-        key_env = jax.random.PRNGKey(cfg.train.seed + 1)
-        self.env_state = jax.jit(jax.vmap(self.env.init))(
-            jax.random.split(key_env, cfg.train.batch_size)
-        )
-        self.env_state = jax.tree_util.tree_map(
-            lambda x: jax.device_put(x, self.data_sharding), self.env_state
-        )
-
-        # Setup
-        self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
-        self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
-        self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
-        self.reward_consts = [1, -1, 1, -1, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
-
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
@@ -92,6 +69,33 @@ class Coach:
             }
             self.buffer_state = self.buffer.init(example_transition)
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
+
+        # Model & optimizer
+        self.model: nnx.Module = self._load_model(self.dirs['checkpoints'], cfg.train.load_checkpoint)
+        self.optimizer = self._load_optimizer(cfg.train.load_checkpoint)
+        graph_def, state = nnx.split((self.model, self.optimizer))
+        state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
+        self.model, self.optimizer = nnx.merge(graph_def, state)
+
+        if hasattr(self, '_restored_buffer_state'):
+            self.buffer_state = self._restored_buffer_state
+            del self._restored_buffer_state
+
+        # Environment
+        self.env = Hnefatafl()
+        key_env = jax.random.PRNGKey(cfg.train.seed + 1)
+        self.env_state = jax.jit(jax.vmap(self.env.init))(
+            jax.random.split(key_env, cfg.train.batch_size)
+        )
+        self.env_state = jax.tree_util.tree_map(
+            lambda x: jax.device_put(x, self.data_sharding), self.env_state
+        )
+
+        # Setup
+        self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
+        self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
+        self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
+        self.reward_consts = [1, -1, 1, -1, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
 
     def _load_optimizer(self, load_checkpoint: bool):
         total_training_steps = 400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps  # 400 iters
@@ -158,6 +162,7 @@ class Coach:
             abstract_checkpoint = {
                 'model': abstract_state,
                 'optimizer': abstract_opt_state,
+                'buffer': self.buffer_state
             }
             restored = self.checkpointer.restore(model_dir, abstract_checkpoint)
 
@@ -182,16 +187,16 @@ class Coach:
             t_loss = self.metrics_tracker.metrics_history['total_loss'][-1]
             p_loss = self.metrics_tracker.metrics_history['policy_loss'][-1]
             v_loss = self.metrics_tracker.metrics_history['value_loss'][-1]
+            v_acc = self.metrics_tracker.metrics_history['value_acc'][-1]
 
-            print(f">>> RESULTS | Total Loss: {t_loss:.4f} (Policy: {p_loss:.4f}, Value: {v_loss:.4f})",
+            print(f"    Total Loss: {t_loss:.4f} (Policy: {p_loss:.4f}, Value: {v_loss:.4f}, Acc: {v_acc:.1%})",
                   flush=True)
 
             if iteration % eval_interval == 0 and iteration >= eval_start:
-                elo = self.evaluator.evaluate_model(iteration)
-                self.metrics_tracker.metrics_history['elo_evaluation'].append(elo)
+                self.evaluator.evaluate_model(iteration)
 
             elapsed = time.time() - start_time
-            print(f">>> TIME    | Iteration {iteration} took {elapsed / 60:.2f} minutes.\n", flush=True)
+            print(f"    Iteration {iteration} took {elapsed / 60:.2f} minutes.\n", flush=True)
 
         self._save_progress()
         self.metrics_tracker.plot_metrics()
@@ -208,7 +213,8 @@ class Coach:
                                ncols=100, unit='steps')
         set_pbar(pbar)
 
-        self.env_state, final_transitions, terminals, rewards = self_play(
+        (self.env_state, final_transitions, terminals, rewards,
+         step_counts, entropies, pieces_left, half_move_draws) = self_play(
             model=self.model,
             env_state=self.env_state,
             rng_key=rng_key,
@@ -216,21 +222,31 @@ class Coach:
             num_simulations=self.cfg.mcts.simulations,
             env=self.env,
             batch_size=self.cfg.train.batch_size,
-            reward_consts=jnp.array(self.reward_consts, dtype=jnp.float32),
-            dirichlet_fraction=self.cfg.train.dirichlet_fraction,
-            attacker_explore=self.cfg.train.attacker_explore
+            reward_consts=jnp.array(self.reward_consts, dtype=jnp.float32)
         )
 
         pbar.close()
         set_pbar(None)
 
-        self._process_results(terminals, rewards)
+        self._process_results(terminals, rewards, step_counts, entropies, pieces_left, half_move_draws)
         final_transitions_cpu = jax.device_get(final_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, final_transitions_cpu, self.buffer)
 
-    def _process_results(self, terminals, rewards):
+    def _process_results(self, terminals, rewards, step_counts, entropies, pieces_left, half_move_draws):
         terminals = jax.device_get(terminals)
         attacker_rewards = jax.device_get(rewards)
+
+        step_counts = jax.device_get(step_counts)
+        entropies = jax.device_get(entropies)
+        pieces_left = jax.device_get(pieces_left)
+        half_move_draws = jax.device_get(half_move_draws)
+
+        completed_game_lengths = step_counts[terminals]
+        self.metrics_tracker.metrics_history['game_lengths'].append(completed_game_lengths)
+        if len(completed_game_lengths) > 0:
+            avg_length = completed_game_lengths.mean()
+        else:
+            avg_length = 0
 
         total_terminated = int(terminals.sum())
         attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
@@ -241,25 +257,29 @@ class Coach:
             a_win_rate = attacker_wins / total_terminated
             d_win_rate = defender_wins / total_terminated
             draw_rate = total_draws / total_terminated
+
+            attacker_ev = (attacker_wins - defender_wins) / total_terminated
+            attacker_score = (attacker_wins + 0.5 * total_draws) / total_terminated
+
+            avg_entropy = float(entropies.mean())
+            avg_pieces = float(pieces_left[terminals].mean())
+            hm_draw_rate = float(half_move_draws.sum() / total_draws) if draw_rate > 0 else 0
         else:
             a_win_rate = d_win_rate = draw_rate = 0.0
+            attacker_ev = attacker_score = 0.0
+            avg_entropy = avg_pieces = hm_draw_rate = 0.0
 
         rates = (a_win_rate, d_win_rate, draw_rate)
         names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
-        # past_5_avg = [] # [Attacker avg, defender avg, draw avg]
 
         for rate, name in zip(rates, names):
             history = self.metrics_tracker.metrics_history[name]
             history.append(rate)
-            # last_5 = history[-5:]
-            # past_5_avg.append(sum(last_5) / len(last_5))
 
-        # self.reward_consts = calculate_dynamic_rewards(past_5_avg[0], past_5_avg[1])
-
-        print(f">>> Self-play games finished: {total_terminated}")
-        print(
-            f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
-        # print(f"    Attacker reward: {self.reward_consts[0]} | Defender reward: {self.reward_consts[2]}")
+        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
+        print(f"    Policy Entropy: {avg_entropy:.4f} | Avg Pieces Left: {avg_pieces:.1f} | Half-Move Draw Rate: {hm_draw_rate:.1%}")
+        print(f"    Attacker EV: {attacker_ev:+.3f} | Attacker Score: {attacker_score:.1%}")
+        print(f"    Average Game Length: {avg_length:.1f} steps")
 
     def _run_training_loop(self):
         self.model.train()
@@ -276,18 +296,19 @@ class Coach:
                 lambda x: jax.device_put(x, self.data_sharding), training_data
             )
 
-            loss, p_loss, v_loss = train_step(
+            loss, p_loss, v_loss, v_acc = train_step(
                 self.model,
                 self.optimizer,
                 training_data
             )
 
-            self.metrics_tracker.update_step(total_loss=loss, policy_loss=p_loss, value_loss=v_loss)
+            self.metrics_tracker.update_step(total_loss=loss, policy_loss=p_loss, value_loss=v_loss, value_acc=v_acc)
 
             pbar.set_postfix({
                 'L': f"{loss:.4f}",
                 'P': f"{p_loss:.4f}",
-                'V': f"{v_loss:.4f}"
+                'V': f"{v_loss:.4f}",
+                'Acc': f"{v_acc:.1%}"
             })
 
         self.metrics_tracker.compute_and_record()
@@ -299,6 +320,7 @@ class Coach:
         checkpoint = {
             'model': model_state,
             'optimizer': opt_state,
+            'buffer': self.buffer
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
         self.evaluator.save_eval_pool()
