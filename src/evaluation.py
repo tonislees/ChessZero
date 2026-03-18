@@ -48,7 +48,7 @@ class Evaluator:
         opponents = self._load_random_opponents(num_opponents)
         eval_sims = self.cfg.mcts.simulations // 2
 
-        games_per_opponent = self.cfg.train.batch_size // num_opponents
+        games_per_opponent = self.cfg.train.eval_batch_size // num_opponents
 
         self.model.eval()
 
