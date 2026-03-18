@@ -288,6 +288,11 @@ x
     def save_eval_pool(self) -> None:
         if not hasattr(self, 'eval_pool') or not self.eval_pool:
             return
+
+        for ckpt_dir in self.dirs['eval_pool'].iterdir():
+            if ckpt_dir.is_dir() and ckpt_dir.name not in self.eval_pool:
+                shutil.rmtree(ckpt_dir, ignore_errors=True)
+
         for model_name, cpu_state in self.eval_pool.items():
             save_path = self.dirs['eval_pool'] / model_name
             if not save_path.exists():

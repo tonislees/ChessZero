@@ -53,7 +53,7 @@ class Coach:
         # Buffer
         min_buffer_size = cfg.train.batch_size * cfg.train.self_play_steps
         self.buffer = fbx.make_flat_buffer(
-            max_length=min_buffer_size * 8,
+            max_length=min_buffer_size * cfg.train.buffer_multiplier,
             min_length=min_buffer_size,
             sample_batch_size=cfg.train.batch_size,
             add_batch_size=cfg.train.batch_size
@@ -174,6 +174,8 @@ class Coach:
     def train(self):
         eval_interval = self.cfg.train.eval_interval
         eval_start = self.cfg.train.eval_start
+        save_interval = self.cfg.train.save_interval
+
         for i in range(self.cfg.train.iterations):
             start_time = time.time()
             iteration = i + self.last_iteration + 1
@@ -195,11 +197,13 @@ class Coach:
             if iteration % eval_interval == 0 and iteration >= eval_start:
                 self.evaluator.evaluate_model(iteration)
 
+            if iteration % save_interval == 0:
+                self._save_progress()
+
             elapsed = time.time() - start_time
             print(f"    Iteration {iteration} took {elapsed / 60:.2f} minutes.\n", flush=True)
 
         self._save_progress()
-        self.metrics_tracker.plot_metrics()
 
     def _run_self_play_loop(self):
         self.model.eval()
