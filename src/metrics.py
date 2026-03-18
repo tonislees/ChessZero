@@ -129,8 +129,7 @@ class MetricsTracker:
         metrics = [
             ('Total Loss', self.metrics_history['total_loss']),
             ('Policy Loss (Cross Entropy)', self.metrics_history['policy_loss']),
-            ('Value Loss (MSE)', self.metrics_history['value_loss']),
-            ('Elo Rating', self.metrics_history['elo_evaluation'])
+            ('Value Loss (MSE)', self.metrics_history['value_loss'])
         ]
 
         frames = self.metrics_history['frames']
@@ -181,7 +180,11 @@ class MetricsTracker:
             'defender_win_rate': [],
             'draw_rate': [],
             'frames': [],
-            'game_lengths': []
+            'game_lengths': [],
+            'pieces_left': [],
+            'entropy': [],
+            'attacker_ev': [],
+            'attacker_score': []
         }
 
         if not load_checkpoint or not self.dirs['metrics'].exists():

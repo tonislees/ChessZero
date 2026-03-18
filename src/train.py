@@ -242,9 +242,8 @@ class Coach:
         half_move_draws = jax.device_get(half_move_draws)
 
         completed_game_lengths = step_counts[terminals]
-        self.metrics_tracker.metrics_history['game_lengths'].append(completed_game_lengths)
         if len(completed_game_lengths) > 0:
-            avg_length = completed_game_lengths.mean()
+            avg_length = float(completed_game_lengths.mean())
         else:
             avg_length = 0
 
@@ -263,21 +262,22 @@ class Coach:
 
             avg_entropy = float(entropies.mean())
             avg_pieces = float(pieces_left[terminals].mean())
-            hm_draw_rate = float(half_move_draws.sum() / total_draws) if draw_rate > 0 else 0
+            hm_draw_rate = float(half_move_draws.sum() / total_terminated)
         else:
             a_win_rate = d_win_rate = draw_rate = 0.0
             attacker_ev = attacker_score = 0.0
             avg_entropy = avg_pieces = hm_draw_rate = 0.0
 
-        rates = (a_win_rate, d_win_rate, draw_rate)
-        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate')
+        metrics = (a_win_rate, d_win_rate, draw_rate, avg_length, avg_pieces,
+                   avg_entropy, attacker_ev, attacker_score)
+        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate', 'game_lengths', 'pieces_left',
+                 'entropy', 'attacker_ev', 'attacker_score')
 
-        for rate, name in zip(rates, names):
-            history = self.metrics_tracker.metrics_history[name]
-            history.append(rate)
+        for metric, name in zip(metrics, names):
+            self.metrics_tracker.metrics_history[name].append(metric)
 
-        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
         print(f"    Policy Entropy: {avg_entropy:.4f} | Avg Pieces Left: {avg_pieces:.1f} | Half-Move Draw Rate: {hm_draw_rate:.1%}")
+        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
         print(f"    Attacker EV: {attacker_ev:+.3f} | Attacker Score: {attacker_score:.1%}")
         print(f"    Average Game Length: {avg_length:.1f} steps")
 
@@ -320,7 +320,7 @@ class Coach:
         checkpoint = {
             'model': model_state,
             'optimizer': opt_state,
-            'buffer': self.buffer
+            'buffer': self.buffer_state
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
         self.evaluator.save_eval_pool()
