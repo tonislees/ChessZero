@@ -1,5 +1,6 @@
 import datetime
 import json
+import shutil
 from pathlib import Path
 
 from flax import nnx
@@ -159,12 +160,18 @@ class MetricsTracker:
 
     def save_metrics(self) -> None:
         """
-        Writes current metrics history into a JSON file for checkpoint.
+        Writes current metrics history into a JSON file and backups the PGN.
         """
-        filename = f"metrics_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json"
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+        filename = f"metrics_{timestamp}.json"
         file_dir = self.dirs['metrics'] / filename
         with open(file_dir, 'w') as f:
             json.dump(self.metrics_history, f, indent=4)
+
+        if self.dirs['pgn'].exists():
+            pgn_backup = self.dirs['metrics'] / f"game_results_{timestamp}.pgn"
+            shutil.copy(self.dirs['pgn'], pgn_backup)
 
     def _load_metrics(self, load_checkpoint: bool) -> dict[str, list[float]]:
         """

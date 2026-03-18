@@ -37,12 +37,12 @@ class Coach:
         # Directories
         root_dir = self.root = Path(__file__).resolve().parents[1]
         model_dir = dir_safe('models', root_dir)
-        metrics_dir = dir_safe('data', root_dir)
+        data_dir = dir_safe('data', root_dir)
         self.dirs = {
             'checkpoints': dir_safe('checkpoints', model_dir),
             'eval_pool': dir_safe('eval_pool', model_dir),
-            'plots': dir_safe('plots', metrics_dir),
-            'metrics': dir_safe('metrics', metrics_dir),
+            'plots': dir_safe('plots', data_dir),
+            'metrics': dir_safe('metrics', data_dir),
             'bayeselo': root_dir / 'bayeselo',
             'pgn': root_dir / 'game_results.pgn',
             'training': dir_safe('training_data', root_dir)
