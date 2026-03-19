@@ -41,6 +41,7 @@ class Coach:
         self.dirs = {
             'checkpoints': dir_safe('checkpoints', model_dir),
             'eval_pool': dir_safe('eval_pool', model_dir),
+            'inference': dir_safe('inference', model_dir),
             'plots': dir_safe('plots', data_dir),
             'metrics': dir_safe('metrics', data_dir),
             'bayeselo': root_dir / 'bayeselo',
@@ -327,6 +328,7 @@ class Coach:
             'buffer': self.buffer_state
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
+        self.checkpointer.save(self.dirs['inference'], {'model': model_state}, force=True)
         self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()
 
