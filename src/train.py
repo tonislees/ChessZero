@@ -301,11 +301,12 @@ class Coach:
                 lambda x: jax.device_put(x, self.data_sharding), training_data
             )
 
+            aug_key = self.rngs.split()
             loss, p_loss, v_loss, v_acc = train_step(
                 self.model,
                 self.optimizer,
                 training_data,
-                rng_key
+                aug_key
             )
 
             self.metrics_tracker.update_step(total_loss=loss, policy_loss=p_loss, value_loss=v_loss, value_acc=v_acc)
