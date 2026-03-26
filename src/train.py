@@ -158,14 +158,9 @@ class Coach:
                 'buffer': abstract_buffer
             }
 
-            restore_args = jax.tree_util.tree_map(
-                lambda _: ocp_args.ArrayRestore(),
-                abstract_checkpoint
-            )
-
             restored = self.checkpointer.restore(
                 ckpt_dir,
-                target=restore_args
+                target=ocp.args.StandardRestore(item=abstract_checkpoint)
             )
             del abstract_model, abstract_opt
 
