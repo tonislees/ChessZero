@@ -12,6 +12,7 @@ from flax import nnx
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
+from orbax.checkpoint import args as ocp_args
 
 from src.evaluation import Evaluator
 from src.hnefatafl.hnefatafl import Hnefatafl
@@ -151,9 +152,20 @@ class Coach:
                 )
                 del full_buffer
 
+            abstract_checkpoint = {
+                'model': abstract_model,
+                'optimizer': abstract_opt,
+                'buffer': abstract_buffer
+            }
+
+            restore_args = jax.tree_util.tree_map(
+                lambda _: ocp_args.ArrayRestore(),
+                abstract_checkpoint
+            )
+
             restored = self.checkpointer.restore(
                 ckpt_dir,
-                {'model': abstract_model, 'optimizer': abstract_opt, 'buffer': abstract_buffer}
+                target=restore_args
             )
             del abstract_model, abstract_opt
 
