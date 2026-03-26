@@ -12,7 +12,7 @@ from flax import nnx
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
-from orbax.checkpoint import args as ocp_args, type_handlers
+from orbax.checkpoint import args as ocp_args
 
 from src.evaluation import Evaluator
 from src.hnefatafl.hnefatafl import Hnefatafl
@@ -146,40 +146,25 @@ class Coach:
 
             with jax.default_device(cpu_device):
                 full_buffer = self.buffer.init(example_transition)
-                abstract_buffer = jax.tree_util.tree_map(
-                    lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
-                    full_buffer
-                )
-                del full_buffer
 
             abstract_checkpoint = {
                 'model': abstract_model,
                 'optimizer': abstract_opt,
-                'buffer': abstract_buffer
+                'buffer': full_buffer
             }
-
-            def make_restore_args(x):
-                return type_handlers.ArrayRestoreArgs(
-                    sharding=self.replicated_sharding,
-                    dtype=x.dtype
-                )
-
-            restore_target = jax.tree_util.tree_map(make_restore_args, abstract_checkpoint)
 
             restored = self.checkpointer.restore(
                 ckpt_dir,
-                target=restore_target
+                target=ocp_args.StandardRestore(item=abstract_checkpoint)
             )
             del abstract_model, abstract_opt
 
             self.model = nnx.merge(graph_def, restored['model'])
-
             self.optimizer = self._create_optimizer()
             nnx.update(self.optimizer, restored['optimizer'])
-
             self.buffer_state = restored['buffer']
 
-            del restored
+            del restored, full_buffer
         else:
             self.optimizer = self._create_optimizer()
             with jax.default_device(cpu_device):
