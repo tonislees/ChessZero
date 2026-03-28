@@ -4,9 +4,9 @@ import jax
 from flax import nnx
 from jax import numpy as jnp, lax
 
-from src.hnefatafl.hnefatafl_jax import MAX_HALF_MOVE_COUNT
-from src.mcts import run_mcts
-from src.utils import policy_value_by_player
+from .hnefatafl.hnefatafl_jax import MAX_HALF_MOVE_COUNT
+from .mcts import run_mcts
+from .utils import policy_value_by_player
 
 _self_play_pbar = None
 

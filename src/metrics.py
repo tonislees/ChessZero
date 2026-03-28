@@ -7,7 +7,7 @@ from flax import nnx
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 
-from src.evaluation import Evaluator
+from .evaluation import Evaluator
 
 
 class MetricsTracker:

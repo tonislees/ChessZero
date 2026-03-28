@@ -11,9 +11,9 @@ from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
-from src.hnefatafl.hnefatafl import Hnefatafl
-from src.mcts import run_mcts
-from src.model import HnefataflZeroNet
+from .hnefatafl.hnefatafl import Hnefatafl
+from .mcts import run_mcts
+from .model import HnefataflZeroNet
 
 
 class Evaluator:

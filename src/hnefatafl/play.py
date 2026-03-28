@@ -5,11 +5,11 @@ from flax import nnx
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
-from src.hnefatafl.hnefatafl import Hnefatafl
-from src.hnefatafl.hnefatafl_jax import GameState, Action, BOARD_EDGE
-from src.hnefatafl.ui import HnefataflUI
-from src.mcts import run_mcts
-from src.model import HnefataflZeroNet
+from .hnefatafl import Hnefatafl
+from .hnefatafl_jax import GameState, Action, BOARD_EDGE
+from .ui import HnefataflUI
+from ..mcts import run_mcts
+from ..model import HnefataflZeroNet
 
 FILE_LETTERS = 'abcdefghijk'
 
@@ -19,7 +19,7 @@ class PlayHnefatafl:
         self.env = Hnefatafl()
         self.seed = 42
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
-        self.mcts_sims = 256
+        self.mcts_sims = 1600
         root_dir = self.root = Path(__file__).resolve().parents[2]
         checkpoint_path = root_dir / 'training_data' / 'model'
         self.model = self.load_model(checkpoint_path)

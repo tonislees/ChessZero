@@ -2,7 +2,7 @@ import pygame
 import sys
 import jax
 import jax.numpy as jnp
-from src.hnefatafl.hnefatafl_jax import Action, BOARD_EDGE, BOARD_SIZE, THRONE
+from .hnefatafl_jax import Action, BOARD_EDGE, BOARD_SIZE, THRONE
 
 SCREEN_SIZE = 720
 GRID_SIZE = BOARD_EDGE

@@ -6,7 +6,7 @@ import pgx
 from flax import nnx
 import jax.numpy as jnp
 
-from src.utils import policy_value_by_player
+from .utils import policy_value_by_player
 
 
 def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
@@ -57,7 +57,7 @@ def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulati
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
-    # Root inference
+    # Root model
     local_model = nnx.merge(graph_def, model_state)
     role = (env_state._x.color + 1) // 2
     root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), role)

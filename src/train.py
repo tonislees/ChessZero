@@ -14,12 +14,12 @@ from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
-from src.evaluation import Evaluator
-from src.hnefatafl.hnefatafl import Hnefatafl
-from src.metrics import MetricsTracker
-from src.model import HnefataflZeroNet
-from src.self_play import self_play, self_play_vs_opponent, set_pbar
-from src.utils import dir_safe, add_to_buffer_cpu, train_step
+from .evaluation import Evaluator
+from .hnefatafl.hnefatafl import Hnefatafl
+from .metrics import MetricsTracker
+from .model import HnefataflZeroNet
+from .self_play import self_play, self_play_vs_opponent, set_pbar
+from .utils import dir_safe, add_to_buffer_cpu, train_step
 
 
 class Coach:
@@ -42,7 +42,7 @@ class Coach:
         self.dirs = {
             'checkpoints': dir_safe('checkpoints', model_dir),
             'eval_pool': dir_safe('eval_pool', model_dir),
-            'inference': dir_safe('inference', model_dir),
+            'model': dir_safe('model', model_dir),
             'plots': dir_safe('plots', data_dir),
             'metrics': dir_safe('metrics', data_dir),
             'bayeselo': root_dir / 'bayeselo',
@@ -247,12 +247,10 @@ class Coach:
         steps = self.cfg.train.self_play_steps
         opponent, opponent_name = self._load_random_sp_opponent()
 
-        print(f"Generating data ({steps} steps x {self.self_batch}+{self.opp_batch} games, opponent: {opponent_name})...")
+        print(
+            f"Generating data ({steps} steps x {self.self_batch}+{self.opp_batch} games, opponent: {opponent_name})...")
 
-        # Alternate which side the current model plays against the opponent
-        player_order = jnp.array([0, 1]) if iteration % 2 == 0 else jnp.array([1, 0])
-        role_str = "attacker" if iteration % 2 == 0 else "defender"
-        print(f"    Opponent batch: current model as {role_str}")
+        player_order = jnp.array([1, 0])
 
         rng_key_self = self.rngs.split()
         rng_key_opp = self.rngs.split()
@@ -294,37 +292,35 @@ class Coach:
         pbar.close()
         set_pbar(None)
 
+        self._process_results(
+            self_terminals, self_rewards, self_step_counts,
+            self_entropies, self_pieces_left, self_hm_draws
+        )
+
+        if opponent is not None:
+            self._log_opponent_results(
+                opp_terminals, opp_rewards, opp_step_counts,
+                opp_entropies, opp_pieces_left, opp_hm_draws,
+                opponent_name
+            )
+
         all_transitions = jax.tree_util.tree_map(
             lambda a, b: jnp.concatenate([a, b], axis=1),
             self_transitions, opp_transitions
         )
-        all_terminals = jnp.concatenate([self_terminals, opp_terminals], axis=1)
-        all_rewards = jnp.concatenate([self_rewards, opp_rewards], axis=1)
-        all_step_counts = jnp.concatenate([self_step_counts, opp_step_counts], axis=1)
-        all_entropies = jnp.concatenate([self_entropies, opp_entropies], axis=1)
-        all_pieces_left = jnp.concatenate([self_pieces_left, opp_pieces_left], axis=1)
-        all_hm_draws = jnp.concatenate([self_hm_draws, opp_hm_draws], axis=1)
-
-        self._process_results(all_terminals, all_rewards, all_step_counts,
-                              all_entropies, all_pieces_left, all_hm_draws)
-
         all_transitions_cpu = jax.device_get(all_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, all_transitions_cpu, self.buffer)
 
     def _process_results(self, terminals, rewards, step_counts, entropies, pieces_left, half_move_draws):
         terminals = jax.device_get(terminals)
         attacker_rewards = jax.device_get(rewards)
-
         step_counts = jax.device_get(step_counts)
         entropies = jax.device_get(entropies)
         pieces_left = jax.device_get(pieces_left)
         half_move_draws = jax.device_get(half_move_draws)
 
         completed_game_lengths = step_counts[terminals]
-        if len(completed_game_lengths) > 0:
-            avg_length = float(completed_game_lengths.mean())
-        else:
-            avg_length = 0
+        avg_length = float(completed_game_lengths.mean()) if len(completed_game_lengths) > 0 else 0
 
         total_terminated = int(terminals.sum())
         attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
@@ -335,30 +331,61 @@ class Coach:
             a_win_rate = attacker_wins / total_terminated
             d_win_rate = defender_wins / total_terminated
             draw_rate = total_draws / total_terminated
-
             attacker_ev = (attacker_wins - defender_wins) / total_terminated
             attacker_score = (attacker_wins + 0.5 * total_draws) / total_terminated
-
             avg_entropy = float(entropies.mean())
             avg_pieces = float(pieces_left[terminals].mean())
             hm_draw_rate = float(half_move_draws.sum() / total_terminated)
         else:
-            a_win_rate = d_win_rate = draw_rate = 0.0
-            attacker_ev = attacker_score = 0.0
+            a_win_rate = d_win_rate = draw_rate = attacker_ev = attacker_score = 0.0
             avg_entropy = avg_pieces = hm_draw_rate = 0.0
 
-        metrics = (a_win_rate, d_win_rate, draw_rate, avg_length, avg_pieces,
-                   avg_entropy, attacker_ev, attacker_score)
-        names = ('attacker_win_rate', 'defender_win_rate', 'draw_rate', 'game_lengths', 'pieces_left',
+        for metric, name in zip(
+                (a_win_rate, d_win_rate, draw_rate, avg_length, avg_pieces,
+                 avg_entropy, attacker_ev, attacker_score),
+                ('attacker_win_rate', 'defender_win_rate', 'draw_rate', 'game_lengths', 'pieces_left',
                  'entropy', 'attacker_ev', 'attacker_score')
-
-        for metric, name in zip(metrics, names):
+        ):
             self.metrics_tracker.metrics_history[name].append(metric)
 
-        print(f"    Policy Entropy: {avg_entropy:.4f} | Avg Pieces Left: {avg_pieces:.1f} | Half-Move Draw Rate: {hm_draw_rate:.1%}")
-        print(f"    Attacker Win Rate: {a_win_rate:.1%} | Defender Win Rate: {d_win_rate:.1%} | Draw Rate: {draw_rate:.1%}")
-        print(f"    Attacker EV: {attacker_ev:+.3f} | Attacker Score: {attacker_score:.1%}")
-        print(f"    Average Game Length: {avg_length:.1f} steps")
+        print(f"  [self-play]  Att: {a_win_rate:.1%}  Def: {d_win_rate:.1%}  Draw: {draw_rate:.1%}"
+              f"  EV: {attacker_ev:+.3f}  Entropy: {avg_entropy:.4f}"
+              f"  Pieces: {avg_pieces:.1f}  HMDraw: {hm_draw_rate:.1%}"
+              f"  AvgLen: {avg_length:.1f}")
+
+    def _log_opponent_results(self, terminals, rewards, step_counts, entropies,
+                              pieces_left, half_move_draws, opponent_name: str):
+        terminals = jax.device_get(terminals)
+        attacker_rewards = jax.device_get(rewards)
+        step_counts = jax.device_get(step_counts)
+        entropies = jax.device_get(entropies)
+        pieces_left = jax.device_get(pieces_left)
+        half_move_draws = jax.device_get(half_move_draws)
+
+        completed_game_lengths = step_counts[terminals]
+        avg_length = float(completed_game_lengths.mean()) if len(completed_game_lengths) > 0 else 0
+
+        total_terminated = int(terminals.sum())
+        if total_terminated > 0:
+            attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
+            defender_wins = int((terminals & (attacker_rewards == -1)).sum())
+            total_draws = int((terminals & (attacker_rewards == 0)).sum())
+            a_win_rate = attacker_wins / total_terminated
+            d_win_rate = defender_wins / total_terminated
+            draw_rate = total_draws / total_terminated
+            attacker_ev = (attacker_wins - defender_wins) / total_terminated
+            avg_entropy = float(entropies.mean())
+            avg_pieces = float(pieces_left[terminals].mean())
+            hm_draw_rate = float(half_move_draws.sum() / total_terminated)
+        else:
+            a_win_rate = d_win_rate = draw_rate = attacker_ev = 0.0
+            avg_entropy = avg_pieces = hm_draw_rate = 0.0
+
+        print(f"  [vs {opponent_name} as Defender]"
+              f"  Att: {a_win_rate:.1%}  Def: {d_win_rate:.1%}  Draw: {draw_rate:.1%}"
+              f"  EV: {attacker_ev:+.3f}  Entropy: {avg_entropy:.4f}"
+              f"  Pieces: {avg_pieces:.1f}  HMDraw: {hm_draw_rate:.1%}"
+              f"  AvgLen: {avg_length:.1f}")
 
     def _run_training_loop(self):
         self.model.train()
@@ -405,7 +432,7 @@ class Coach:
         }
         self.checkpointer.save(self.dirs['checkpoints'], checkpoint, force=True)
         self.checkpointer.wait_until_finished()
-        self.checkpointer.save(self.dirs['inference'], {'model': model_state}, force=True)
+        self.checkpointer.save(self.dirs['model'], {'model': model_state}, force=True)
         self.checkpointer.wait_until_finished()
         self.evaluator.save_eval_pool()
         self.metrics_tracker.save_metrics()

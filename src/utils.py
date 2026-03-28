@@ -6,7 +6,7 @@ import optax
 from flax import nnx
 from jax import numpy as jnp
 
-from src.hnefatafl.hnefatafl_jax import ROTATION_PERM
+from .hnefatafl.hnefatafl_jax import ROTATION_PERM
 
 
 def augment_batch(batch, rng_key):
