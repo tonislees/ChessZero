@@ -5,6 +5,7 @@ from pathlib import Path
 import flashbax as fbx
 import hydra
 import jax
+from jax import Array
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 import jax.numpy as jnp
@@ -15,11 +16,24 @@ import orbax.checkpoint as ocp
 from tqdm import tqdm
 
 from .evaluation import Evaluator
-from .hnefatafl.hnefatafl import Hnefatafl
+from .tablut.tablut import Tablut, State
 from .metrics import MetricsTracker
-from .model import HnefataflZeroNet
+from .model import TablutZeroNet
 from .self_play import self_play, self_play_vs_opponent, set_pbar
-from .utils import dir_safe, add_to_buffer_cpu, train_step
+from .utils import add_to_buffer_cpu, train_step, create_path_dict, GameStats, compute_game_stats, _format_stats_line
+
+"""
+AlphaZero training loop orchestrator for TablutZero.
+
+Each iteration consists of:
+    1. Self-play data generation (split between self-play and opponent-play batches)
+    2. Training on uniformly sampled replay buffer data
+    3. Periodic evaluation against a pool of past checkpoints (BayesElo rating)
+    4. Periodic checkpointing of model, optimizer, and buffer state
+
+The Coach class manages the full pipeline: environment setup, multi-device
+sharding, replay buffer, and checkpoint save/restore.
+"""
 
 
 class Coach:
@@ -37,18 +51,7 @@ class Coach:
 
         # Directories
         root_dir = self.root = Path(__file__).resolve().parents[1]
-        model_dir = dir_safe('models', root_dir)
-        data_dir = dir_safe('data', root_dir)
-        self.dirs = {
-            'checkpoints': dir_safe('checkpoints', model_dir),
-            'eval_pool': dir_safe('eval_pool', model_dir),
-            'model': dir_safe('model', model_dir),
-            'plots': dir_safe('plots', data_dir),
-            'metrics': dir_safe('metrics', data_dir),
-            'bayeselo': root_dir / 'bayeselo',
-            'pgn': root_dir / 'game_results.pgn',
-            'training': dir_safe('training_data', root_dir)
-        }
+        self.dirs = create_path_dict(root_dir)
         if not cfg.train.load_checkpoint:
             self.dirs['pgn'].unlink(missing_ok=True)
 
@@ -73,13 +76,13 @@ class Coach:
         self.sample_fn = jax.jit(self.buffer.sample, backend='cpu')
 
         # Model & optimizer
-        self._init_or_restore(example_transition, cpu_device)
+        self._init_or_restore_checkpoint(example_transition, cpu_device)
         graph_def, state = nnx.split((self.model, self.optimizer))
         state = jax.tree_util.tree_map(lambda x: jax.device_put(x, self.replicated_sharding), state)
         self.model, self.optimizer = nnx.merge(graph_def, state)
 
         # Environment
-        self.env = Hnefatafl()
+        self.env = Tablut()
 
         self.opp_ratio = cfg.train.get('opponent_ratio', 0.25)
         self.opp_batch = int(cfg.train.batch_size * self.opp_ratio)
@@ -97,12 +100,14 @@ class Coach:
         )
 
         # Setup
+        self.train_step_fn = nnx.jit(train_step)
         self.last_iteration = self._get_last_iteration() if cfg.train.load_checkpoint else 0
         self.evaluator = Evaluator(cfg, self.dirs, self.rngs, self.model, self.checkpointer, self.env)
-        self.metrics_tracker = MetricsTracker(cfg, self.dirs, self.evaluator)
-        self.reward_consts = [1, -1, 1, -1, 0.0, 0.0] # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
+        self.metrics_tracker = MetricsTracker(cfg, self.dirs)
+        self.reward_consts = [1, -1, 1, -1, 0.0, 0.0]
+        # [attacker_win_r, attacker_loss_r, defender_win_r, defender_loss_r, attacker_draw_r, defender_draw_r]
 
-    def _create_optimizer(self):
+    def _create_optimizer(self) -> nnx.Optimizer:
         total_training_steps = 400 * self.cfg.train.num_epochs * self.cfg.train.self_play_steps
 
         schedule = optax.warmup_cosine_decay_schedule(
@@ -122,23 +127,19 @@ class Coach:
             wrt=nnx.Param
         )
 
-    def _get_last_iteration(self):
-        """
-        Finds the last iteration number from eval pool directories.
-        Returns last iteration.
-        """
+    def _get_last_iteration(self) -> int:
         dirs = [d.name for d in self.dirs['eval_pool'].iterdir() if d.is_dir()]
         dirs = list(map(lambda x: int(x.split('_')[1]), dirs))
         dirs.sort()
         print(dirs)
         return dirs[-1]
 
-    def _init_or_restore(self, example_transition, cpu_device):
+    def _init_or_restore_checkpoint(self, example_transition: dict[str, Array], cpu_device: jax.Device) -> None:
         load = self.cfg.train.load_checkpoint
         ckpt_dir = self.dirs['checkpoints']
         has_checkpoint = load and ckpt_dir.exists() and any(ckpt_dir.iterdir())
 
-        self.model = HnefataflZeroNet(
+        self.model = TablutZeroNet(
             depth=self.cfg.model.depth,
             filter_count=self.cfg.model.filter_count,
             rngs=self.rngs
@@ -178,7 +179,7 @@ class Coach:
             with jax.default_device(cpu_device):
                 self.buffer_state = self.buffer.init(example_transition)
 
-    def train(self):
+    def train(self) -> None:
         eval_interval = self.cfg.train.eval_interval
         eval_start = self.cfg.train.eval_start
         save_interval = self.cfg.train.save_interval
@@ -188,7 +189,7 @@ class Coach:
             iteration = i + self.last_iteration + 1
             print(f"--- Iteration {iteration} ---")
 
-            self._run_self_play_loop(iteration)
+            self._run_self_play_loop()
             self._run_training_loop()
 
             self.metrics_tracker.update_frames(self.cfg.train.self_play_steps * self.cfg.train.batch_size)
@@ -212,11 +213,9 @@ class Coach:
 
         self._save_progress()
 
-    def _load_random_sp_opponent(self):
+    def _load_random_sp_opponent(self) -> tuple[nnx.Module, str]:
         """Load a random opponent from the eval pool for mixed self-play."""
         pool = self.evaluator.eval_pool
-        if not pool:
-            return None, None
 
         name = random.choice(list(pool.keys()))
         graph_def, _ = nnx.split(self.model)
@@ -225,7 +224,7 @@ class Coach:
         opponent.eval()
         return opponent, name
 
-    def _init_opponent_env(self, player_order):
+    def _init_opponent_env(self, player_order: Array) -> State:
         """Create a fresh opponent env state with forced player_order."""
         key = self.rngs.split()
         env_state_opp = jax.jit(jax.vmap(self.env.init))(
@@ -241,7 +240,7 @@ class Coach:
         )
         return env_state_opp
 
-    def _run_self_play_loop(self, iteration: int):
+    def _run_self_play_loop(self) -> None:
         self.model.eval()
 
         steps = self.cfg.train.self_play_steps
@@ -292,17 +291,20 @@ class Coach:
         pbar.close()
         set_pbar(None)
 
-        self._process_results(
+        # Self-play stats (recorded to metrics)
+        self_stats = compute_game_stats(
             self_terminals, self_rewards, self_step_counts,
             self_entropies, self_pieces_left, self_hm_draws
         )
+        self._record_stats(self_stats)
+        print(f"  [self-play]  {_format_stats_line(self_stats)}")
 
-        if opponent is not None:
-            self._log_opponent_results(
-                opp_terminals, opp_rewards, opp_step_counts,
-                opp_entropies, opp_pieces_left, opp_hm_draws,
-                opponent_name
-            )
+        # Opponent-play stats (logged only)
+        opp_stats = compute_game_stats(
+            opp_terminals, opp_rewards, opp_step_counts,
+            opp_entropies, opp_pieces_left, opp_hm_draws
+        )
+        print(f"  [vs {opponent_name} as Defender]  {_format_stats_line(opp_stats)}")
 
         all_transitions = jax.tree_util.tree_map(
             lambda a, b: jnp.concatenate([a, b], axis=1),
@@ -311,83 +313,17 @@ class Coach:
         all_transitions_cpu = jax.device_get(all_transitions)
         self.buffer_state = add_to_buffer_cpu(self.buffer_state, all_transitions_cpu, self.buffer)
 
-    def _process_results(self, terminals, rewards, step_counts, entropies, pieces_left, half_move_draws):
-        terminals = jax.device_get(terminals)
-        attacker_rewards = jax.device_get(rewards)
-        step_counts = jax.device_get(step_counts)
-        entropies = jax.device_get(entropies)
-        pieces_left = jax.device_get(pieces_left)
-        half_move_draws = jax.device_get(half_move_draws)
-
-        completed_game_lengths = step_counts[terminals]
-        avg_length = float(completed_game_lengths.mean()) if len(completed_game_lengths) > 0 else 0
-
-        total_terminated = int(terminals.sum())
-        attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
-        defender_wins = int((terminals & (attacker_rewards == -1)).sum())
-        total_draws = int((terminals & (attacker_rewards == 0)).sum())
-
-        if total_terminated > 0:
-            a_win_rate = attacker_wins / total_terminated
-            d_win_rate = defender_wins / total_terminated
-            draw_rate = total_draws / total_terminated
-            attacker_ev = (attacker_wins - defender_wins) / total_terminated
-            attacker_score = (attacker_wins + 0.5 * total_draws) / total_terminated
-            avg_entropy = float(entropies.mean())
-            avg_pieces = float(pieces_left[terminals].mean())
-            hm_draw_rate = float(half_move_draws.sum() / total_terminated)
-        else:
-            a_win_rate = d_win_rate = draw_rate = attacker_ev = attacker_score = 0.0
-            avg_entropy = avg_pieces = hm_draw_rate = 0.0
-
-        for metric, name in zip(
-                (a_win_rate, d_win_rate, draw_rate, avg_length, avg_pieces,
-                 avg_entropy, attacker_ev, attacker_score),
+    def _record_stats(self, s: GameStats) -> None:
+        """Append self-play game stats to the metrics tracker."""
+        for value, name in zip(
+                (s.attacker_win_rate, s.defender_win_rate, s.draw_rate, s.avg_length, s.avg_pieces,
+                 s.avg_entropy, s.attacker_ev, s.attacker_score),
                 ('attacker_win_rate', 'defender_win_rate', 'draw_rate', 'game_lengths', 'pieces_left',
                  'entropy', 'attacker_ev', 'attacker_score')
         ):
-            self.metrics_tracker.metrics_history[name].append(metric)
+            self.metrics_tracker.metrics_history[name].append(value)
 
-        print(f"  [self-play]  Att: {a_win_rate:.1%}  Def: {d_win_rate:.1%}  Draw: {draw_rate:.1%}"
-              f"  EV: {attacker_ev:+.3f}  Entropy: {avg_entropy:.4f}"
-              f"  Pieces: {avg_pieces:.1f}  HMDraw: {hm_draw_rate:.1%}"
-              f"  AvgLen: {avg_length:.1f}")
-
-    def _log_opponent_results(self, terminals, rewards, step_counts, entropies,
-                              pieces_left, half_move_draws, opponent_name: str):
-        terminals = jax.device_get(terminals)
-        attacker_rewards = jax.device_get(rewards)
-        step_counts = jax.device_get(step_counts)
-        entropies = jax.device_get(entropies)
-        pieces_left = jax.device_get(pieces_left)
-        half_move_draws = jax.device_get(half_move_draws)
-
-        completed_game_lengths = step_counts[terminals]
-        avg_length = float(completed_game_lengths.mean()) if len(completed_game_lengths) > 0 else 0
-
-        total_terminated = int(terminals.sum())
-        if total_terminated > 0:
-            attacker_wins = int((terminals & (attacker_rewards == 1)).sum())
-            defender_wins = int((terminals & (attacker_rewards == -1)).sum())
-            total_draws = int((terminals & (attacker_rewards == 0)).sum())
-            a_win_rate = attacker_wins / total_terminated
-            d_win_rate = defender_wins / total_terminated
-            draw_rate = total_draws / total_terminated
-            attacker_ev = (attacker_wins - defender_wins) / total_terminated
-            avg_entropy = float(entropies.mean())
-            avg_pieces = float(pieces_left[terminals].mean())
-            hm_draw_rate = float(half_move_draws.sum() / total_terminated)
-        else:
-            a_win_rate = d_win_rate = draw_rate = attacker_ev = 0.0
-            avg_entropy = avg_pieces = hm_draw_rate = 0.0
-
-        print(f"  [vs {opponent_name} as Defender]"
-              f"  Att: {a_win_rate:.1%}  Def: {d_win_rate:.1%}  Draw: {draw_rate:.1%}"
-              f"  EV: {attacker_ev:+.3f}  Entropy: {avg_entropy:.4f}"
-              f"  Pieces: {avg_pieces:.1f}  HMDraw: {hm_draw_rate:.1%}"
-              f"  AvgLen: {avg_length:.1f}")
-
-    def _run_training_loop(self):
+    def _run_training_loop(self) -> None:
         self.model.train()
 
         total_steps = self.cfg.train.self_play_steps * self.cfg.train.num_epochs
@@ -403,7 +339,7 @@ class Coach:
             )
 
             aug_key = self.rngs.split()
-            loss, p_loss, v_loss, v_acc = train_step(
+            loss, p_loss, v_loss, v_acc = self.train_step_fn(
                 self.model,
                 self.optimizer,
                 training_data,
@@ -421,7 +357,7 @@ class Coach:
 
         self.metrics_tracker.compute_and_record()
 
-    def _save_progress(self):
+    def _save_progress(self) -> None:
         """Saves the model parameters, loss data, and evaluation data."""
         _, model_state = nnx.split(self.model)
         _, opt_state = nnx.split(self.optimizer)

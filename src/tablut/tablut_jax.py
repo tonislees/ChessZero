@@ -5,6 +5,27 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array, lax
 
+"""
+Pure-JAX Tablut game engine on a 9×9 board.
+
+Board representation:
+    -1 = attacker (taflman), 1 = defender (taflman), 2 = king, 0 = empty.
+    The board is stored from the current player's perspective: positive pieces are
+    friendly, negative pieces are enemy. _flip() negates the board on turn change.
+
+Action encoding (AlphaZero-style):
+    Each action is a flat index into BOARD_SIZE × ACTION_PLANES (81 × 32 = 2592).
+    ACTION_PLANES = 4 directions × (BOARD_EDGE - 1) max distance = 32.
+    Plane layout: [right 1..8, up 1..8, down 1..8, left 1..8].
+
+Coordinate system:
+    Square index = row * BOARD_EDGE + col, with row 0 at the bottom (rank 1).
+
+Precomputed arrays (FROM_PLANE, TO_PLANE, BETWEEN, ATTACK_PAIR, etc.) are computed
+once at import time as NumPy arrays, then converted to JAX arrays for use in jitted
+functions.
+"""
+
 BOARD_EDGE = 9
 BOARD_SIZE = BOARD_EDGE * BOARD_EDGE # 81
 THRONE = BOARD_SIZE // 2 # 40
@@ -12,7 +33,7 @@ MAX_SHIELD_WALL_PARTNERS = BOARD_EDGE - 4
 
 ACTION_PLANES = 4 * (BOARD_EDGE - 1)
 
-EMPTY, TAFLMAN, KING = tuple(range(3))
+EMPTY, TAFLMAN, KING = tuple(range(3)) # 0, 1, 2
 NUM_ATTACKERS = (BOARD_EDGE - 5) * 4
 MAX_TERMINATION_STEPS = 512
 MAX_HALF_MOVE_COUNT: float = 200.0
@@ -62,7 +83,7 @@ ZERO_INIT_ACTION_MASK = jnp.zeros(BOARD_SIZE * ACTION_PLANES, dtype=jnp.bool_)
 #                             23
 
 
-def calc_hostile_squares():
+def calc_hostile_squares() -> tuple[np.ndarray, np.ndarray]:
     """Calculate the hostile squares: corners and throne."""
     bottom_left = 0
     bottom_right = BOARD_EDGE
@@ -81,7 +102,7 @@ def calc_hostile_squares():
 HOSTILE_SQUARES_MASK, CORNERS_MASK = calc_hostile_squares()
 
 
-def calc_rows_columns():
+def calc_rows_columns() -> tuple[np.ndarray, np.ndarray]:
     """Calculate matrices for row and column indices."""
     rows = np.zeros((BOARD_EDGE, BOARD_EDGE), dtype=np.int32)
     columns = np.zeros((BOARD_EDGE, BOARD_EDGE), dtype=np.int32)
@@ -100,7 +121,7 @@ def calc_rows_columns():
 ROWS, COLUMNS = calc_rows_columns()
 
 
-def calc_edges():
+def calc_edges() -> tuple[np.ndarray, np.ndarray]:
     """Calculate arrays for edge indices, possible shield wall partners,
     and neighbor indices for each shield wall inner neighbor"""
     top = ROWS[BOARD_EDGE - 1]
@@ -124,7 +145,7 @@ def calc_edges():
 EDGES, INNER_NEIGHBOR = calc_edges()
 
 
-def calc_action_arrays():
+def calc_action_arrays() -> tuple[np.ndarray, np.ndarray]:
     """Calculate mappings for conversions between Action objects and action indices."""
 
     from_plane = -np.ones((BOARD_SIZE, ACTION_PLANES), dtype=np.int32)
@@ -156,7 +177,7 @@ def calc_action_arrays():
 FROM_PLANE, TO_PLANE = calc_action_arrays()
 
 
-def calc_capture_arrays():
+def calc_capture_arrays() -> tuple[np.ndarray, np.ndarray]:
     """Calculate the arrays representing attack pairs and neighboring squares."""
 
     attack_pair = -np.ones((BOARD_SIZE, 4), dtype=np.int32)
@@ -194,7 +215,7 @@ def calc_capture_arrays():
 ATTACK_PAIR, NEIGHBORS = calc_capture_arrays()
 
 
-def calc_action_legality_arrays():
+def calc_action_legality_arrays() -> np.ndarray:
     """Calculate a legal destinations array for each square."""
 
     legal_dest = -np.ones((3, BOARD_SIZE, BOARD_SIZE), dtype=np.int32)
@@ -218,16 +239,23 @@ def calc_action_legality_arrays():
 LEGAL_DEST = calc_action_legality_arrays()
 
 
-def calc_between_squares():
+def calc_between_squares() -> np.ndarray:
     """Calculate all squares indices between two squares."""
 
     between = -np.ones((BOARD_SIZE, BOARD_SIZE, BOARD_EDGE - 2), dtype=np.int32)
     for from_sq in range(BOARD_SIZE):
         for to_sq in range(BOARD_SIZE):
-            row_from, col_from, row_to, col_to = from_sq // BOARD_EDGE, from_sq % BOARD_EDGE, to_sq // BOARD_EDGE, to_sq % BOARD_EDGE
+            row_from = from_sq // BOARD_EDGE
+            col_from = from_sq % BOARD_EDGE
+            row_to = to_sq // BOARD_EDGE
+            col_to = to_sq % BOARD_EDGE
+
+            # Skip if from- and to-squares are the same
             if not (abs(row_to - row_from) == 0 or abs(col_to - col_from) == 0):
                 continue
-            row_sign, col_sign = max(min(row_to - row_from, 1), -1), max(min(col_to - col_from, 1), -1)
+
+            row_sign = max(min(row_to - row_from, 1), -1)
+            col_sign = max(min(col_to - col_from, 1), -1)
             for i in range(BOARD_EDGE - 2):
                 row = row_from + row_sign * (i + 1)
                 col = col_from + col_sign * (i + 1)
@@ -242,7 +270,18 @@ BETWEEN = calc_between_squares()
 
 DIR_MAP_90 = {0: 2, 1: 0, 2: 3, 3: 1}  # right→down, up→right, down→left, left→up
 
-def _compute_rotation_perms():
+def _compute_rotation_perms() -> np.ndarray:
+    """
+    Precompute D4 rotation permutation tables for policy vector augmentation.
+
+    Returns a (4, BOARD_SIZE * ACTION_PLANES) int32 array where perms[k] maps each
+    action label in the rotated-by-k*90° frame back to the corresponding label in the
+    original frame. Used in augment_batch() to rotate policy targets and legal action
+    masks consistently with the board observation rotation.
+
+    Rotation convention: k=1 is 90° counterclockwise (matching jnp.rot90 on the board).
+    Direction remapping per 90° step: right→down, up→right, down→left, left→up.
+    """
     dist = BOARD_EDGE - 1
     perms = np.zeros((4, BOARD_SIZE * ACTION_PLANES), dtype=np.int32)
     perms[0] = np.arange(BOARD_SIZE * ACTION_PLANES)
@@ -258,7 +297,7 @@ def _compute_rotation_perms():
                 d = DIR_MAP_90[d]
             new_plane = d * dist + old_plane % dist
             perms[k][new_sq * ACTION_PLANES + new_plane] = old_label
-    return jnp.array(perms)
+    return perms
 
 ROTATION_PERM = _compute_rotation_perms()
 
@@ -303,7 +342,7 @@ def legal_moves(state: GameState, from_sq: Array) -> Array:
 
     piece = state.board[from_sq]
 
-    def legal_label(to_sq) -> Array:
+    def legal_label(to_sq: Array) -> Array:
         dest_valid = (to_sq >= 0) & (to_sq < BOARD_SIZE)
 
         between_idxs = BETWEEN[from_sq, to_sq]
@@ -329,10 +368,9 @@ def _legal_action_mask(state: GameState) -> Array:
     return mask
 
 
-def initialize_legal_actions(state: GameState):
+def initialize_legal_actions(state: GameState) -> Array:
     """
     Dynamically calculates the mask for the initial board state.
-    This replaces the hardcoded dictionary.
     """
     return _legal_action_mask(state)
 
@@ -352,7 +390,7 @@ class Game:
         )
 
     @staticmethod
-    def step(state: GameState, action: Array):
+    def step(state: GameState, action: Array) -> GameState:
         state = _apply_move(state, Action.from_label(action))
         state = _flip(state)
         state = _update_history(state)
@@ -361,7 +399,7 @@ class Game:
         return state
 
     @staticmethod
-    def observe(state: GameState):
+    def observe(state: GameState) -> Array:
         ones = jnp.ones((1, BOARD_EDGE, BOARD_EDGE), dtype=jnp.float32)
         color = (state.color + 1) // 2
 
@@ -392,11 +430,11 @@ class Game:
         ).transpose((1, 2, 0))
 
     @staticmethod
-    def legal_action_mask(state: GameState):
+    def legal_action_mask(state: GameState) -> Array:
         return state.legal_action_mask
 
     @staticmethod
-    def is_terminal(state: GameState):
+    def is_terminal(state: GameState) -> Array:
         # Stalemate
         terminated = ~state.legal_action_mask.any()
 
@@ -418,7 +456,18 @@ class Game:
         return terminated
 
     @staticmethod
-    def mcts_status(state: GameState):
+    def mcts_status(state: GameState) -> tuple[Array, Array]:
+        """
+        Terminal status check used inside MCTS tree expansion.
+
+        Unlike rewards(), returns explicit per-side scores that can be scaled by
+        reward_consts in the recurrent function. Separates attacker wins, defender
+        wins, and draws into distinct cases.
+
+        Returns:
+            (terminated, scores) where scores are [attacker_score, defender_score],
+            each in {-1, 0, 1}.
+        """
         king_captured = _check_king_captured(state)
         attacker_won = king_captured
 
@@ -446,7 +495,14 @@ class Game:
         return terminated, jnp.array([attacker_score, defender_score], dtype=jnp.float32)
 
     @staticmethod
-    def rewards(state: GameState):
+    def rewards(state: GameState) -> Array:
+        """
+        Final game rewards for the pgx State wrapper, indexed by player_order.
+
+        Returns [attacker_score, defender_score] in {-1, 0, 1}. Used for terminal
+        reward assignment in self-play and evaluation. Not used inside MCTS — see
+        mcts_status() for that.
+        """
         # Attackers win
         king_captured = _check_king_captured(state)
 
@@ -486,11 +542,11 @@ class Game:
         return jnp.array([attacker_score, defender_score])
 
 
-def _check_king_captured(state: GameState):
+def _check_king_captured(state: GameState) -> Array:
     return ~jnp.any(jnp.abs(state.board) == KING)
 
 
-def _flip(state: GameState):
+def _flip(state: GameState) -> GameState:
     return state._replace(
         board=-state.board,
         color=-state.color,
@@ -498,7 +554,7 @@ def _flip(state: GameState):
     )
 
 
-def _check_captures(state: GameState, to_sq):
+def _check_captures(state: GameState, to_sq: Array) -> GameState:
     attack_indices = ATTACK_PAIR[to_sq]
     victim_indices = NEIGHBORS[to_sq]
 
@@ -523,7 +579,7 @@ def _check_captures(state: GameState, to_sq):
     return state._replace(board=state.board.at[safe_victim_indices].set(new_values))
 
 
-def _apply_move(state: GameState, action: Action):
+def _apply_move(state: GameState, action: Action) -> GameState:
     piece = state.board[action.from_sq]
 
     # Move the piece
@@ -540,7 +596,7 @@ def _apply_move(state: GameState, action: Action):
     return state._replace(half_move_count=half_move_count)
 
 
-def _update_history(state: GameState):
+def _update_history(state: GameState) -> GameState:
     board_history = jnp.roll(state.board_history, 1, axis=0)
     board_history = board_history.at[0, :].set(state.board)
     hash_history = jnp.roll(state.hash_history, 1, axis=0)
@@ -548,7 +604,14 @@ def _update_history(state: GameState):
     return state._replace(board_history=board_history, hash_history=hash_history)
 
 
-def _zobrist_hash(state: GameState):
+def _zobrist_hash(state: GameState) -> Array:
+    """
+    Compute a 2-element uint32 Zobrist hash of the current board and side to move.
+
+    The hash is XOR-reduced over per-square piece keys and a side-to-move key.
+    Two uint32 elements are used instead of one to reduce collision probability
+    for repetition detection across the full game history.
+    """
     hash_ = lax.select(state.color == -1, ZOBRIST_SIDE, jnp.zeros_like(ZOBRIST_SIDE))
     to_reduce = ZOBRIST_BOARD[jnp.arange(BOARD_SIZE), state.board + 2]
     hash_ ^= lax.reduce(to_reduce, 0, lax.bitwise_xor, (0,))

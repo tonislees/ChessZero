@@ -3,15 +3,25 @@ import json
 import shutil
 from pathlib import Path
 
+import numpy as np
 from flax import nnx
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 
-from .evaluation import Evaluator
+from .utils import run_bayeselo
 
+
+"""
+Training metrics tracking and visualization.
+
+MetricsTracker accumulates per-step loss metrics via flax.nnx.MultiMetric,
+records per-iteration self-play statistics (win rates, entropy, game length),
+and generates standalone PDF plots for different metrics. Metrics
+history is persisted as timestamped JSON files alongside PGN backups.
+"""
 
 class MetricsTracker:
-    def __init__(self, cfg: DictConfig, dirs: dict[str, Path], evaluator: Evaluator):
+    def __init__(self, cfg: DictConfig, dirs: dict[str, Path]):
         self.dirs = dirs
         self.cfg = cfg
         self.metrics_history = self._load_metrics(cfg.train.load_checkpoint)
@@ -21,7 +31,7 @@ class MetricsTracker:
             value_loss=nnx.metrics.Average(argname='value_loss'),
             value_acc=nnx.metrics.Average(argname='value_acc')
         )
-        self.evaluator = evaluator
+        self.timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
     def update_frames(self, frame_count: int) -> None:
         """
@@ -58,39 +68,96 @@ class MetricsTracker:
 
         self.metrics.reset()
 
-    def plot_elo(self, batch_size: int, train_steps: int):
+    def load_latest_metrics(self) -> tuple[dict, list[float]]:
         metrics_dir = self.dirs['training'] / 'metrics'
-        ratings = self.evaluator.run_bayeselo(list(metrics_dir.glob("game_results_*.pgn"))[0])
-        frames_per_iter = batch_size * train_steps
         metrics_files = sorted(metrics_dir.glob("metrics_*.json"))
         if not metrics_files:
-            return
+            raise Exception('No metrics file found')
         with open(metrics_files[-1]) as f:
             history = json.load(f)
+        frames_per_iter = history['frames'][0]
+        n_iters = len(history['frames'])
+        frames = [(i + 1) * frames_per_iter / 1e6 for i in range(n_iters)]
+        return history, frames
 
-        # Elo
+    def plot_elo(self) -> None:
+        metrics_dir = self.dirs['training'] / 'metrics'
+        ratings = run_bayeselo(list(metrics_dir.glob("game_results_*.pgn"))[0], self.dirs['bayeselo'])
+
         sorted_items = sorted(ratings.items(), key=lambda x: int(x[0].split('_')[1]))
+        frames_per_iter = self.load_latest_metrics()[0]['frames'][0]
         iters = [int(name.split('_')[1]) for name, _ in sorted_items]
         elos = [e - min(ratings.values()) for _, e in sorted_items]
         elo_frames = [i * frames_per_iter / 1e6 for i in iters]
 
-        # Win/draw rates
-        n_iters = len(history['attacker_win_rate'])
-        rate_frames = [(i + 1) * frames_per_iter / 1e6 for i in range(n_iters)]
+        plt.figure(figsize=(6, 5))
+        plt.plot(elo_frames, elos, marker='o', linewidth=2, color='royalblue')
+        plt.ylabel("Elo")
+        plt.xlabel("Frames (millions)")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        elo_path = self.dirs['plots'] / f"elo_plot_{self.timestamp}.pdf"
+        plt.savefig(elo_path, dpi=150)
+        plt.close()
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+    def plot_elo_comparison(self) -> None:
+        elos_dir = self.dirs['training'] / 'elos'
+        metrics_dir = self.dirs['training'] / 'metric'
 
-        # Elo
-        ax1.plot(elo_frames, elos, marker='o', linewidth=2, color='royalblue')
-        ax1.set_ylabel("Elo")
-        ax1.set_xlabel("Frames (millions)")
-        ax1.set_title("Elo Rating")
-        ax1.grid(True, alpha=0.3)
-        ax1.set_aspect('auto')
+        plt.figure(figsize=(6, 5))
 
-        # Stacked area win rates
-        ax2.stackplot(
-            rate_frames,
+        pgn_files = sorted(elos_dir.glob("*.pgn"), key=lambda x: int(x.stem))
+
+        colors = ['royalblue', 'crimson', 'forestgreen', 'darkorange', 'purple']
+        descriptions = ['Baseline', '+ Augmentation & Buffer', '+ Past-Iteration Self-Play']
+
+        for i, pgn_path in enumerate(pgn_files):
+            version_id = int(pgn_path.stem)
+            json_path = metrics_dir / f"{version_id}.json"
+
+            if not json_path.exists():
+                print(f"Warning: No matching metric json for {pgn_path.name}")
+                continue
+
+            ratings = run_bayeselo(pgn_path, self.dirs['bayeselo'])
+            sorted_items = sorted(ratings.items(), key=lambda x: int(x[0].split('_')[1]))
+
+            with open(json_path) as f:
+                history = json.load(f)
+
+            frames_per_iter = history['frames'][0]
+            iters = [int(name.split('_')[1]) for name, _ in sorted_items]
+            elo_frames = [it * frames_per_iter / 1e6 for it in iters]
+
+            base_elo = min(ratings.values())
+            elos = [e - base_elo for _, e in sorted_items]
+
+            color = colors[i % len(colors)]
+            plt.plot(elo_frames, elos, marker='o', markersize=4, linewidth=2,
+                     color=color, label=descriptions[version_id - 1])
+
+        plt.ylabel("Elo Rating ")
+        plt.xlabel("Frames (millions)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        elo_path = self.dirs['plots'] / f"elo_comparison_{self.timestamp}.pdf"
+        plt.savefig(elo_path, dpi=150)
+        plt.close()
+
+    def plot_results(self) -> None:
+        history, frames = self.load_latest_metrics()
+
+        window = 10
+        attacker_win_rates = np.array(history['attacker_win_rate'])
+        rolling_avg = np.convolve(attacker_win_rates, np.ones(window) / window, mode='valid')  # type: ignore[arg-type]
+        rolling_frames = frames[window - 1:]
+
+        plt.figure(figsize=(6, 5))
+
+        plt.stackplot(
+            frames,
             history['attacker_win_rate'],
             history['draw_rate'],
             history['defender_win_rate'],
@@ -98,129 +165,65 @@ class MetricsTracker:
             colors=['#4CAF50', '#9E9E9E', '#F44336'],
             alpha=0.85
         )
-        ax2.set_ylabel("Rate")
-        ax2.set_xlabel("Frames (millions)")
-        ax2.set_title("Game Outcomes")
-        ax2.set_ylim(0, 1)
-        ax2.legend(loc='upper left')
-        ax2.grid(True, alpha=0.2)
 
-        plt.tight_layout(w_pad=4)
+        plt.plot(
+            rolling_frames,
+            rolling_avg,
+            color='white',
+            linewidth=2,
+            label=f'{window}-Iter Attacker Avg'
+        )
 
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        plot_path = self.dirs['plots'] / f"Training_Summary_{timestamp}.pdf"
-        plt.savefig(plot_path, dpi=150)
-        plt.close(fig)
+        plt.ylabel("Rate")
+        plt.xlabel("Frames (millions)")
+        plt.ylim(0, 1)
+        plt.legend(loc='upper left', fontsize='small', framealpha=0.5)
+        plt.grid(True, alpha=0.2)
+        plt.tight_layout()
 
-    def plot_all_metrics(self):
-        root = Path(__file__).resolve().parents[1]
-        metrics_dir = root / 'training_data' / 'metrics'
-        plots_dir = root / 'training_data' / 'plots'
-        plots_dir.mkdir(parents=True, exist_ok=True)
+        outcomes_path = self.dirs['plots'] / f"outcomes_plot_{self.timestamp}.pdf"
+        plt.savefig(outcomes_path, dpi=150)
+        plt.close()
 
-        metric_files = sorted(metrics_dir.glob("metrics_*.json"))
-        if not metric_files:
-            print("No metrics files found.")
-            return
+    def plot_loss(self) -> None:
+        history, frames = self.load_latest_metrics()
 
-        latest = metric_files[-1]
-        print(f"Loading {latest.name}")
-        with open(latest) as f:
-            h = json.load(f)
+        plt.figure(figsize=(6, 5))
+        plt.plot(frames, history['total_loss'], label='Total Loss', color='black', alpha=0.3, linestyle='--')
+        plt.plot(frames, history['policy_loss'], label='Policy (CE)', color='#1f77b4')
+        plt.plot(frames, history['value_loss'], label='Value (MSE)', color='#ff7f0e')
+        plt.yscale('log')
+        plt.xlabel("Frames (millions)")
+        plt.ylabel("Loss (Log Scale)")
+        plt.legend()
+        plt.grid(True, which="both", alpha=0.2)
+        plt.tight_layout()
+        plt.savefig(self.dirs['plots'] / f"loss_plot_{self.timestamp}.pdf")
+        plt.close()
 
-        frames = h['frames']
-        if not frames:
-            print("No frame data.")
-            return
+    def plot_entropy(self) -> None:
+        history, frames = self.load_latest_metrics()
 
-        frames_m = [f / 1e6 for f in frames]
+        plt.figure(figsize=(6, 5))
+        plt.plot(frames, history['entropy'], color='#9467bd', linewidth=2)
+        plt.xlabel("Frames (millions)")
+        plt.ylabel("Entropy (nats)")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.dirs['plots'] / f"entropy_plot_{self.timestamp}.pdf")
+        plt.close()
 
-        fig, axes = plt.subplots(4, 3, figsize=(24, 22))
-        fig.suptitle('HnefataflZero Training Dashboard', fontsize=16, fontweight='bold', y=0.98)
+    def plot_avg_pieces(self) -> None:
+        history, frames = self.load_latest_metrics()
 
-        single_plots = [
-            (0, 0, 'Total Loss', 'total_loss', 'Loss'),
-            (0, 1, 'Policy Loss', 'policy_loss', 'Loss'),
-            (0, 2, 'Value Loss', 'value_loss', 'MSE'),
-            (1, 0, 'Value Accuracy', 'value_acc', 'Accuracy'),
-            (1, 1, 'Policy Entropy', 'entropy', 'Entropy (nats)'),
-            (1, 2, 'Average Game Length', 'game_lengths', 'Steps'),
-            (2, 0, 'Average Pieces Left', 'pieces_left', 'Pieces'),
-            (2, 1, 'Attacker EV', 'attacker_ev', 'EV'),
-            (2, 2, 'Attacker Score', 'attacker_score', 'Score'),
-        ]
-
-        for row, col, title, key, ylabel in single_plots:
-            ax = axes[row, col]
-            data = h.get(key, [])
-            if data and len(data) == len(frames_m):
-                ax.plot(frames_m, data, linewidth=1.5)
-            ax.set_title(title, fontweight='bold')
-            ax.set_xlabel('Frames (M)')
-            ax.set_ylabel(ylabel)
-            ax.grid(True, alpha=0.3)
-
-        # Stacked area: win rates
-        ax_wr = axes[3, 0]
-        aw = h.get('attacker_win_rate', [])
-        dw = h.get('defender_win_rate', [])
-        dr = h.get('draw_rate', [])
-        if aw and len(aw) == len(frames_m):
-            ax_wr.stackplot(
-                frames_m, aw, dr, dw,
-                labels=['Attacker Win', 'Draw', 'Defender Win'],
-                colors=['#4CAF50', '#9E9E9E', '#F44336'], alpha=0.85
-            )
-            ax_wr.set_ylim(0, 1)
-            ax_wr.set_title('Game Outcomes', fontweight='bold')
-            ax_wr.set_xlabel('Frames (M)')
-            ax_wr.set_ylabel('Rate')
-            ax_wr.legend(loc='upper right', fontsize=8)
-            ax_wr.grid(True, alpha=0.2)
-
-        # Win rate lines
-        ax_wrl = axes[3, 1]
-        if aw and len(aw) == len(frames_m):
-            ax_wrl.plot(frames_m, aw, linewidth=1.5, color='#4CAF50', label='Attacker')
-            ax_wrl.plot(frames_m, dw, linewidth=1.5, color='#F44336', label='Defender')
-            ax_wrl.plot(frames_m, dr, linewidth=1.5, color='#9E9E9E', label='Draw')
-            ax_wrl.axhline(0.5, color='black', linestyle='--', alpha=0.3)
-            ax_wrl.set_title('Win Rates', fontweight='bold')
-            ax_wrl.set_xlabel('Frames (M)')
-            ax_wrl.set_ylabel('Rate')
-            ax_wrl.legend(fontsize=8)
-            ax_wrl.grid(True, alpha=0.3)
-
-        # Dual axis: value loss vs accuracy
-        ax_dual = axes[3, 2]
-        vl = h.get('value_loss', [])
-        va = h.get('value_acc', [])
-        if vl and len(vl) == len(frames_m):
-            c_loss, c_acc = '#1f77b4', '#ff7f0e'
-            ax_dual.plot(frames_m, vl, linewidth=1.5, color=c_loss, label='Value Loss')
-            ax_dual.set_ylabel('Value Loss', color=c_loss)
-            ax_dual.tick_params(axis='y', labelcolor=c_loss)
-
-            ax2 = ax_dual.twinx()
-            ax2.plot(frames_m, va, linewidth=1.5, color=c_acc, label='Value Acc')
-            ax2.set_ylabel('Value Accuracy', color=c_acc)
-            ax2.tick_params(axis='y', labelcolor=c_acc)
-
-            ax_dual.set_title('Value Head: Loss vs Accuracy', fontweight='bold')
-            ax_dual.set_xlabel('Frames (M)')
-            ax_dual.grid(True, alpha=0.3)
-
-            lines1, labels1 = ax_dual.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax_dual.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-        plot_path = plots_dir / f"All_Metrics_{timestamp}.pdf"
-        plt.savefig(plot_path, dpi=150)
-        plt.close(fig)
-        print(f"Saved to {plot_path}")
+        plt.figure(figsize=(6, 5))
+        plt.plot(frames, history['pieces_left'], color='#8c564b', linewidth=2)
+        plt.xlabel("Frames (millions)")
+        plt.ylabel("Piece Count")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.dirs['plots'] / f"pieces_plot_{self.timestamp}.pdf")
+        plt.close()
 
     def save_metrics(self) -> None:
         """

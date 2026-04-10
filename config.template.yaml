@@ -3,7 +3,7 @@ defaults:
   - override hydra/job_logging: disabled
   - override hydra/hydra_logging: disabled
 
-project_name: "HnefataflZero"
+project_name: "TablutZero"
 
 hydra:
   run:
@@ -13,24 +13,23 @@ hydra:
     level: ERROR
 
 model:
-  depth: 7
-  filter_count: 256
+  depth: 8                # Number of ResNet blocks
+  filter_count: 128       # Number of filters in each ResNet block
 
 mcts:
-  simulations: 2
+  simulations: 128        # Number of Monte Carlo simulations during search
 
 train:
-  iterations: 10
-  batch_size: 2
-  self_play_steps: 100
-  num_epochs: 15
-  max_eval_pool: 10
-  seed: 42
-  tqdm_interval: 5.0
-  learning_rate: 0.001
-  load_checkpoint: False
-  eval_interval: 5
-  eval_start: 25
-
-interface:
-  start_player: white
+  iterations: 100         # Number of RL iterations
+  batch_size: 1024        # Number of environments in the self-play batch
+  eval_batch_size: 1034   # Number of environments in the evaluation batch
+  self_play_steps: 256    # Number of steps taken in each game environment
+  num_epochs: 2           # Number of epochs during training phase
+  max_eval_pool: 10       # Number of models in evaluation pool
+  seed: 42                # Seed for randomness
+  tqdm_interval: 1.0      # Number of seconds between progressbar updates
+  load_checkpoint: False  # True if training is to be continued from a checkpoint
+  eval_interval: 5        # Number of iterations between evaluation phases
+  eval_start: 20          # Iteration number from which evaluation starts
+  save_interval: 20       # Number of iterations between checkpoint saves
+  buffer_multiplier: 12   # Number of past iterations that will be saved in the buffer

@@ -2,7 +2,7 @@ import pygame
 import sys
 import jax
 import jax.numpy as jnp
-from .hnefatafl_jax import Action, BOARD_EDGE, BOARD_SIZE, THRONE
+from .tablut_jax import Action, BOARD_EDGE, BOARD_SIZE, THRONE
 
 SCREEN_SIZE = 720
 GRID_SIZE = BOARD_EDGE
@@ -23,7 +23,7 @@ COLOR_KING = (212, 175, 55)
 CORNERS = [0, GRID_SIZE - 1, BOARD_SIZE - GRID_SIZE, BOARD_SIZE - 1]
 
 
-class HnefataflUI:
+class TablutUI:
     def __init__(self, logic_engine):
         pygame.init()
         pygame.display.set_caption(f"Hnefatafl JAX ({GRID_SIZE}x{GRID_SIZE})")
@@ -163,7 +163,7 @@ class HnefataflUI:
         if action_label != -1:
             step_key, self.engine.key_env = jax.random.split(self.engine.key_env)
             self.engine.state = self.engine.step_fn(self.engine.state, action_label, step_key)
-            self.engine.game_state = self.engine.state._x
+            self.engine.game_state = self.engine.state.game_state
             self.check_game_over()
 
     def run(self):

@@ -2,32 +2,48 @@ from functools import partial
 
 import jax
 import mctx
-import pgx
 from flax import nnx
 import jax.numpy as jnp
+from jax import Array
 
-from .utils import policy_value_by_player
+from .tablut.tablut import State, Tablut
+from .utils import policy_value_by_player, scale_rewards
 
+"""
+Gumbel MuZero MCTS via the mctx library.
 
-def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
-                 embedding, env, graph_def, reward_consts: jax.Array):
-    next_game_state = jax.vmap(env.game.step)(embedding._x, action)
+Uses mctx.gumbel_muzero_policy with a recurrent function that steps the game
+internally (no external simulator calls during search). Reward shaping is applied
+inside the tree through configurable reward_consts.
+
+The discount convention follows mctx's two-player formulation:
+    discount = -1.0 for non-terminal states (negates value for opponent's turn)
+    discount =  0.0 for terminal states (cuts off future value)
+"""
+
+def recurrent_fn(model_state: nnx.GraphState, rng_key: Array, action: Array, embedding, env: Tablut,
+                 graph_def: nnx.GraphDef, reward_consts: Array) -> tuple[mctx.RecurrentFnOutput, State]:
+    """
+    MCTS expansion function: simulate one game step and return (output, next_state).
+
+    Applies reward scaling via reward_consts before passing rewards into the tree.
+    Reward_consts format: [a_win, a_loss, d_win, d_loss, a_draw, d_draw] where
+    each element replaces the corresponding raw {-1, 0, 1} outcome.
+
+    The returned reward is from the perspective of the player who just moved
+    (embedding.current_player), and the discount is -1.0 (non-terminal) or
+    0.0 (terminal) to handle the alternating-player value negation.
+    """
+    next_game_state = jax.vmap(env.game.step)(embedding.game_state, action)
 
     batch_idx = jnp.arange(action.shape[0])[:, None]
     color_idx = (next_game_state.color + 1) // 2
 
     is_term, raw_rewards = jax.vmap(env.game.mcts_status)(next_game_state)
-
-    r_a_win, r_a_loss, r_d_win, r_d_loss, r_a_draw, r_d_draw = reward_consts
-    att_raw = raw_rewards[:, 0]
-    def_raw = raw_rewards[:, 1]
-
-    scaled_att = jnp.where(att_raw > 0, r_a_win, jnp.where(att_raw < 0, r_a_loss, r_a_draw))
-    scaled_def = jnp.where(def_raw > 0, r_d_win, jnp.where(def_raw < 0, r_d_loss, r_d_draw))
-    scaled_rewards = jnp.stack([scaled_att, scaled_def], axis=1)
+    scaled_rewards = scale_rewards(raw_rewards, reward_consts)
 
     next_state = embedding.replace(
-        _x=next_game_state,
+        game_state=next_game_state,
         terminated=is_term,
         rewards=scaled_rewards[batch_idx, embedding._player_order],
         current_player=embedding._player_order[jnp.arange(action.shape[0]), color_idx]
@@ -40,7 +56,7 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     logits, value = policy_value_by_player(local_model(next_obs), role)
 
     rewards = next_state.rewards[jnp.arange(next_state.rewards.shape[0]), embedding.current_player]
-    discounts = jnp.where(next_state.terminated, 0.0, -1.0)
+    discounts = jnp.where(jnp.asarray(next_state.terminated), 0.0, -1.0)
 
     output = mctx.RecurrentFnOutput(
         reward=rewards,
@@ -52,14 +68,24 @@ def recurrent_fn(model_state, rng_key: jax.Array, action: jax.Array,
     return output, next_state
 
 
-def run_mcts(graph_def, model_state, env_state, rng_key: jax.Array, num_simulations: int, env: pgx.Env,
-             reward_consts: jax.Array = jnp.array([1.0, -1.0, 1.0, -1.0, 0.0, 0.0])):
+def run_mcts(graph_def: nnx.GraphDef, model_state: nnx.GraphState, env_state,
+             rng_key: Array, num_simulations: int, env: Tablut,
+             reward_consts: Array = jnp.array([1.0, -1.0, 1.0, -1.0, 0.0, 0.0])) -> mctx.PolicyOutput:
+    """
+    Run Gumbel MuZero MCTS from the given environment state.
+
+    Handles both batched and unbatched input: if env_state.observation is 3D
+    (single state), it is automatically expanded with a batch dimension of 1.
+
+    Returns mctx.PolicyOutput with action, action_weights (improved policy),
+    and search statistics.
+    """
     if env_state.observation.ndim == 3:
         env_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, axis=0), env_state)
 
     # Root model
     local_model = nnx.merge(graph_def, model_state)
-    role = (env_state._x.color + 1) // 2
+    role = (env_state.game_state.color + 1) // 2
     root_logits, root_value = policy_value_by_player(local_model(env_state.observation, train=False), role)
 
     root = mctx.RootFnOutput(

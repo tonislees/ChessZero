@@ -5,18 +5,18 @@ from flax import nnx
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
-from .hnefatafl import Hnefatafl
-from .hnefatafl_jax import GameState, Action, BOARD_EDGE
-from .ui import HnefataflUI
+from .tablut import Tablut
+from .tablut_jax import GameState, Action, BOARD_EDGE
+from .ui import TablutUI
 from ..mcts import run_mcts
-from ..model import HnefataflZeroNet
+from ..model import TablutZeroNet
 
 FILE_LETTERS = 'abcdefghijk'
 
 
-class PlayHnefatafl:
+class PlayTablut:
     def __init__(self, ai_color=-1):
-        self.env = Hnefatafl()
+        self.env = Tablut()
         self.seed = 42
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
         self.mcts_sims = 1600
@@ -30,12 +30,12 @@ class PlayHnefatafl:
         )
         self.state = jax.tree_util.tree_map(lambda x: x[0], batched_state)
         self.step_fn = jax.jit(self.env.step)
-        self.game_state: GameState = self.state._x
+        self.game_state: GameState = self.state.game_state
         self.board_edge = BOARD_EDGE
         self.columns = {FILE_LETTERS[i]: i for i in range(BOARD_EDGE)}
 
     def load_model(self, checkpoint_path: Path):
-        model = HnefataflZeroNet(
+        model = TablutZeroNet(
             depth=8,
             filter_count=128,
             rngs=self.rngs
@@ -73,7 +73,7 @@ class PlayHnefatafl:
         action_label = mcts_output.action[0]
 
         self.state = self.step_fn(self.state, action_label)
-        self.game_state = self.state._x
+        self.game_state = self.state.game_state
 
         action_obj = Action.from_label(action_label)
         uci_move = self._sq_to_uci(int(action_obj.from_sq)) + self._sq_to_uci(int(action_obj.to_sq))
@@ -85,7 +85,7 @@ class PlayHnefatafl:
             jax.random.split(self.key_env, 1)
         )
         self.state = jax.tree_util.tree_map(lambda x: x[0], batched_state)
-        self.game_state: GameState = self.state._x
+        self.game_state: GameState = self.state.game_state
 
     def print_board(self):
         board = self.game_state.board
@@ -165,7 +165,7 @@ class PlayHnefatafl:
             action = self.uci_to_action(move)
             print(action)
             self.state = self.step_fn(self.state, action)
-            self.game_state = self.state._x
+            self.game_state = self.state.game_state
         except Exception as e:
             print('Wrong format or illegal move: {}', e)
 
@@ -194,10 +194,10 @@ class PlayHnefatafl:
                 break
 
     def play_ui(self):
-        ui = HnefataflUI(self)
+        ui = TablutUI(self)
         ui.run()
 
 
 if __name__ == '__main__':
-    game = PlayHnefatafl(ai_color=-1)
+    game = PlayTablut(ai_color=-1)
     game.play_ui()

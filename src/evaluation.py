@@ -1,24 +1,32 @@
 import random
 import shutil
-import subprocess
 from functools import partial
 from pathlib import Path
 
 import jax
 from flax import nnx
-from jax import numpy as jnp, lax
+from jax import numpy as jnp, lax, Array
 from omegaconf import DictConfig
 import orbax.checkpoint as ocp
 from tqdm import tqdm
 
-from .hnefatafl.hnefatafl import Hnefatafl
+from .tablut.tablut import Tablut, State
 from .mcts import run_mcts
-from .model import HnefataflZeroNet
+from .model import TablutZeroNet
+from .utils import run_bayeselo
 
+"""
+Evaluation and BayesElo rating for TablutZero checkpoints.
+
+The Evaluator maintains a pool of past model checkpoints (CPU-resident state dicts).
+On each evaluation call, the current model plays against a subset of pool members
+from both sides (attacker and defender). Results are appended to a PGN file and
+processed by the BayesElo program to compute ratings.
+"""
 
 class Evaluator:
     def __init__(self, cfg: DictConfig, dirs: dict[str, Path], rngs: nnx.Rngs,
-                 model: nnx.Module, checkpointer: ocp.StandardCheckpointer, env: Hnefatafl):
+                 model: nnx.Module, checkpointer: ocp.StandardCheckpointer, env: Tablut):
         self.cfg = cfg
         self.dirs = dirs
         self.rngs = rngs
@@ -28,7 +36,7 @@ class Evaluator:
         self.eval_pool = self._load_eval_pool(cfg.train.load_checkpoint)
         self._add_to_eval_pool(iteration=0)
 
-    def _init_eval_state(self, is_starter: bool, batch_size: int):
+    def _init_eval_state(self, is_starter: bool, batch_size: int) -> State:
         key_env = jax.random.split(self.rngs.split(), batch_size)
         state = jax.jit(jax.vmap(self.env.init))(key_env)
 
@@ -42,7 +50,7 @@ class Evaluator:
             current_player=player_order[:, 0]
         )
 
-    def evaluate_model(self, iteration: int):
+    def evaluate_model(self, iteration: int) -> None:
         current_model = f"iter_{iteration}"
         num_opponents = min(4, len(self.eval_pool))
         opponents = self._load_random_opponents(num_opponents)
@@ -96,7 +104,7 @@ class Evaluator:
         self._log_eval_results(current_model, opponent_summaries)
 
         self._generate_minimal_pgn(all_match_data)
-        ratings = self.run_bayeselo(self.dirs['pgn'])
+        ratings = run_bayeselo(self.dirs['pgn'], self.dirs['bayeselo'])
 
         elo = ratings.get(current_model, 0)
         last_elo = ratings.get(f'iter_{iteration - 1}', 0)
@@ -110,7 +118,7 @@ class Evaluator:
 
     @staticmethod
     def _get_eval_metrics(rewards_p0: jax.Array, rewards_p1: jax.Array,
-                          opponent: str, current_model: str):
+                          opponent: str, current_model: str) -> tuple[list, dict]:
         match_data = []
 
         p0_stats = {"wins": 0, "losses": 0, "draws": 0}
@@ -148,7 +156,7 @@ class Evaluator:
         return match_data, summary
 
     @staticmethod
-    def _log_eval_results(current_model: str, summaries: list[dict]):
+    def _log_eval_results(current_model: str, summaries: list[dict]) -> None:
         total_wins = total_losses = total_draws = total_games = 0
         att_wins = att_losses = att_draws = 0
         def_wins = def_losses = def_draws = 0
@@ -194,7 +202,14 @@ class Evaluator:
         print(f"\n  Attacker win rate: {att_winrate:.1%}   Defender win rate: {def_winrate:.1%}")
         print()
 
-    def _generate_minimal_pgn(self, match_data):
+    def _generate_minimal_pgn(self, match_data) -> None:
+        """
+        Appends match results to the PGN file for BayesElo processing.
+
+        Uses dummy moves (1. d4 d5) since BayesElo only needs player names and
+        results, not actual move sequences. Appends rather than overwrites so
+        results accumulate across iterations.
+        """
         with open(self.dirs['pgn'], "a") as f:
             for attacker, defender, reward in match_data:
                 if reward == 1:     result_str = "1-0"
@@ -206,42 +221,7 @@ class Evaluator:
                 f.write(f'[Result "{result_str}"]\n')
                 f.write("1. d4 d5\n\n")
 
-    def run_bayeselo(self, pgn_path: Path):
-        commands = f"""readpgn {pgn_path}
-elo
-mm
-exactdist
-ratings
-x
-x
-"""
-        process = subprocess.Popen(
-            [self.dirs['bayeselo']],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = process.communicate(commands)
-
-        ratings = {}
-        parsing_table = False
-
-        for line in stdout.splitlines():
-            if "Rank Name" in line:
-                parsing_table = True
-                continue
-            if parsing_table:
-                parts = line.split()
-                if not parts or not parts[0].isdigit():
-                    if "ResultSet" in line:
-                        break
-                    continue
-                ratings[parts[1]] = int(parts[2])
-
-        return ratings
-
-    def _load_eval_pool(self, load_checkpoint: bool) -> dict[str, HnefataflZeroNet]:
+    def _load_eval_pool(self, load_checkpoint: bool) -> dict[str, TablutZeroNet]:
         pool = {}
         dir_path = self.dirs['eval_pool']
         if not load_checkpoint:
@@ -250,8 +230,8 @@ x
             return pool
 
         _, abstract_state = nnx.split(
-            HnefataflZeroNet(depth=self.cfg.model.depth,
-                             filter_count=self.cfg.model.filter_count, rngs=self.rngs)
+            TablutZeroNet(depth=self.cfg.model.depth,
+                          filter_count=self.cfg.model.filter_count, rngs=self.rngs)
         )
         dirs = [d for d in dir_path.iterdir() if d.is_dir()]
 
@@ -299,8 +279,14 @@ x
                 self.checkpointer.save(save_path.resolve(), cpu_state)
         self.checkpointer.wait_until_finished()
 
-    def _load_random_opponents(self, n: int) -> dict:
-        """Load n opponents: always include two of the most recent, fill rest randomly."""
+    def _load_random_opponents(self, n: int) -> dict[str, nnx.Module]:
+        """
+        Selects n opponents from the eval pool with an anchor strategy.
+
+        Always includes the two most recent checkpoints (to track incremental
+        progress), then fills remaining slots randomly from the rest of the pool.
+        Returns a dict mapping model names to GPU-resident nnx.Module instances.
+        """
         pool_names = list(self.eval_pool.keys())
         if not pool_names:
             return {}
@@ -326,7 +312,18 @@ x
 
 
 @partial(nnx.jit, static_argnames=('num_simulations', 'env'))
-def evaluate(model_A, model_B, state, rng_key, num_simulations, env):
+def evaluate(model_A: nnx.Module, model_B: nnx.Module, state: State,
+             rng_key: Array, num_simulations: int, env: Tablut) -> Array:
+    """
+    Play out batched games between model_A and model_B to completion.
+
+    Uses a lax.while_loop that runs until all games in the batch have terminated.
+    A termination mask tracks which games have finished; their rewards are frozen
+    at the terminal value while remaining games continue.
+
+    model_A plays when current_player == 0, model_B when current_player == 1.
+    Returns final rewards with shape (batch, 2).
+    """
     graph_def_A, model_A_state = nnx.split(model_A)
     graph_def_B, model_B_state = nnx.split(model_B)
 
