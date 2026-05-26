@@ -19,9 +19,9 @@ class PlayTablut:
         self.env = Tablut()
         self.seed = 42
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
-        self.mcts_sims = 1600
+        self.mcts_sims = 200
         root_dir = self.root = Path(__file__).resolve().parents[2]
-        checkpoint_path = root_dir / 'training_data' / 'model'
+        checkpoint_path = root_dir / 'inference' / 'model'
         self.model = self.load_model(checkpoint_path)
         self.ai_color = ai_color
         self.key_env = jax.random.PRNGKey(self.seed + 1)

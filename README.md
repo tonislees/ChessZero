@@ -103,6 +103,44 @@ Set `load_checkpoint: True` in `config.yaml`. The system will restore the model,
 
 The provided model was trained on two NVIDIA H200 GPUs with 320GB of system RAM. The replay buffer is held in RAM and can grow large depending on the `buffer_multiplier` setting. Multi-GPU training is supported via JAX's data-parallel sharding.
 
+## How to Play Against AI
+
+The project includes a Pygame interface for playing against the trained AI or another human locally.
+
+### 1. Launching the Game
+Ensure you have a trained model checkpoint in `training_data/model/`. Launch the interface using:
+```bash
+python main.py
+```
+*Note: The game will perform a "warmup" on startup to pre-compile the AI's neural network logic. This ensures the first move is instantaneous.*
+
+### 2. Game Setup
+Upon launching, you will see the Main Menu:
+- **Set the Clock**: Use the **+** and **-** buttons in the central panel to adjust the initial time.
+- **Choose a Mode**:
+    - **Play vs AI (Attacker)**: You play the red side (moves first).
+    - **Play vs AI (Defender)**: You play the blue side (defends the King).
+    - **Player vs Player**: Play locally against a friend.
+
+### 3. Gameplay Basics
+- **Selecting Pieces**: Click on a piece to see its legal move destinations (marked with green diamonds).
+- **Capturing**: Surround an enemy piece on two opposite sides (custodially) to capture it. The central **Throne** and the four **Corner** squares also act as hostile squares for capturing.
+- **Winning**: 
+    - **Attackers**: Win by capturing the King.
+    - **Defenders**: Win by escorting the King to any of the four ornate corner squares.
+
+### 4. Reviewing History & Navigation
+The UI includes a move log and navigation system:
+- **Move Log**: The sidebar displays the move history. The current state is highlighted in gold.
+- **Navigation Buttons**: Use `|<` (Start), `<` (Prev), `>` (Next), and `>|` (Latest) to browse the board state history.
+- **Keyboard Shortcuts**: 
+    - **Left/Right Arrows**: Step through the game's history.
+    - **Home/End**: Jump to the beginning or the latest move.
+    - **R**: Reset the current game.
+    - **ESC**: Return to the main menu.
+
+*The board is read-only while viewing past states. Jump to the latest move to continue playing.*
+
 ## Tech Stack
 
 - **[JAX](https://github.com/jax-ml/jax)** — Vectorized computation and automatic differentiation
@@ -114,3 +152,16 @@ The provided model was trained on two NVIDIA H200 GPUs with 320GB of system RAM.
 - **[Orbax](https://github.com/google/orbax)** — Checkpointing
 - **[Hydra](https://github.com/facebookresearch/hydra)** — Configuration management
 - **[Pygame](https://www.pygame.org/)** — Game UI
+
+## Citation
+```
+@misc{lees2026reproducingalphazerotablutselfplay,
+      title={Reproducing AlphaZero on Tablut: Self-Play RL for an Asymmetric Board Game}, 
+      author={Tõnis Lees and Tambet Matiisen},
+      year={2026},
+      eprint={2604.05476},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2604.05476}, 
+}
+```
