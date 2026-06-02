@@ -39,12 +39,13 @@ class Tablut(core.Env):
         self.game = Game()
 
     def _init(self, key: PRNGKey) -> State:
-        game_state = GameState()
+        game_state = self.game.init()
         _player_order = jnp.array([[0, 1], [1, 0]])[jax.random.bernoulli(key).astype(jnp.int32)]
         state = State(  # type: ignore
             current_player=_player_order[(game_state.color + 1) // 2],
             _player_order=_player_order,
             game_state=game_state,
+            legal_action_mask=game_state.legal_action_mask
         )
         return state
 

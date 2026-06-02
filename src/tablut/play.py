@@ -10,16 +10,17 @@ from .tablut_jax import GameState, Action, BOARD_EDGE
 from .ui import TablutUI
 from ..mcts import run_mcts
 from ..model import TablutZeroNet
+from ..utils import policy_value_by_player
 
 FILE_LETTERS = 'abcdefghijk'
 
 
 class PlayTablut:
-    def __init__(self, ai_color=-1):
+    def __init__(self, ai_color=-1, mcts_sims=300):
         self.env = Tablut()
         self.seed = 42
         self.rngs: nnx.Rngs = nnx.Rngs(self.seed)
-        self.mcts_sims = 200
+        self.mcts_sims = mcts_sims
         root_dir = self.root = Path(__file__).resolve().parents[2]
         checkpoint_path = root_dir / 'inference' / 'model'
         self.model = self.load_model(checkpoint_path)
@@ -33,6 +34,106 @@ class PlayTablut:
         self.game_state: GameState = self.state.game_state
         self.board_edge = BOARD_EDGE
         self.columns = {FILE_LETTERS[i]: i for i in range(BOARD_EDGE)}
+
+        # Warm up JAX MCTS compilation in the background to avoid JIT lag on the first move
+        def warm_up():
+            try:
+                dummy_key = jax.random.PRNGKey(self.seed)
+                g_def, m_state = nnx.split(self.model)
+                _ = run_mcts(
+                    graph_def=g_def,
+                    model_state=m_state,
+                    env_state=self.state,
+                    rng_key=dummy_key,
+                    num_simulations=self.mcts_sims,
+                    env=self.env
+                )
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=warm_up, daemon=True).start()
+
+        # Define JIT-compiled state evaluator to run fast neural network value inference
+        @jax.jit
+        def eval_state_fn(observation, color):
+            role = (color + 1) // 2
+            g_def, m_state = nnx.split(self.model)
+            local_model = nnx.merge(g_def, m_state)
+            obs_batched = jnp.expand_dims(observation, axis=0)
+            role_batched = jnp.expand_dims(role, axis=0)
+            _, val = policy_value_by_player(local_model(obs_batched, train=False), role_batched)
+            return val[0]
+            
+        self.eval_state_fn = eval_state_fn
+
+        # Define JIT-compiled move probability evaluator to compute raw policy logits
+        @jax.jit
+        def get_move_probs_fn(observation, color, legal_action_mask):
+            role = (color + 1) // 2
+            g_def, m_state = nnx.split(self.model)
+            local_model = nnx.merge(g_def, m_state)
+            obs_batched = jnp.expand_dims(observation, axis=0)
+            role_batched = jnp.expand_dims(role, axis=0)
+            logits, _ = policy_value_by_player(local_model(obs_batched, train=False), role_batched)
+            # Mask illegal actions
+            masked_logits = jnp.where(legal_action_mask, logits[0], -1e9)
+            # Softmax
+            probs = jax.nn.softmax(masked_logits)
+            return probs
+            
+        self.get_move_probs_fn = get_move_probs_fn
+
+    def get_evaluation(self, state):
+        gstate = state.game_state if hasattr(state, 'game_state') else state
+        val = self.eval_state_fn(state.observation, gstate.color)
+        val = float(val)
+        # Convert to absolute attacker perspective (Attacker color -1, Defender color 1)
+        if int(gstate.color) == 1:
+            val = -val
+        return val
+
+    def evaluate_user_move(self, state, action_label):
+        gstate = state.game_state if hasattr(state, 'game_state') else state
+        probs = self.get_move_probs_fn(state.observation, gstate.color, gstate.legal_action_mask)
+        probs_list = jnp.array(probs).tolist()
+        
+        # Get legal actions and their probabilities
+        legal_indices = [i for i, is_legal in enumerate(gstate.legal_action_mask.tolist()) if is_legal]
+        if not legal_indices:
+            return "Good Move! :)", (100, 215, 125)
+            
+        # Pair indices with probabilities and sort descending
+        legal_probs = [(idx, probs_list[idx]) for idx in legal_indices]
+        legal_probs.sort(key=lambda x: x[1], reverse=True)
+        
+        best_action, best_prob = legal_probs[0]
+        user_prob = probs_list[action_label]
+        
+        # Find user's rank (0-indexed)
+        user_rank = -1
+        for rank, (idx, p) in enumerate(legal_probs):
+            if idx == action_label:
+                user_rank = rank
+                break
+                
+        # Classify the move using ratio relative to best move
+        ratio = user_prob / max(1e-5, best_prob)
+        
+        if user_rank == 0:
+            return "Best Move! :D", (212, 175, 55)  # GOLD
+        elif user_rank <= 3:  # 2nd to 4th best
+            if ratio >= 0.25:
+                return "Good Move! :)", (100, 215, 125)  # GREEN
+            elif ratio >= 0.05:
+                return "Inaccurate Move :|", (230, 150, 50)  # ORANGE
+            else:
+                return "Mistake :(", (220, 80, 80)  # RED
+        else:
+            if ratio >= 0.05:
+                return "Inaccurate Move :|", (230, 150, 50)  # ORANGE
+            else:
+                return "Mistake :(", (220, 80, 80)  # RED
+
 
     def load_model(self, checkpoint_path: Path):
         model = TablutZeroNet(
@@ -72,7 +173,8 @@ class PlayTablut:
 
         action_label = mcts_output.action[0]
 
-        self.state = self.step_fn(self.state, action_label)
+        self.key_env, step_key = jax.random.split(self.key_env)
+        self.state = self.step_fn(self.state, action_label, step_key)
         self.game_state = self.state.game_state
 
         action_obj = Action.from_label(action_label)
